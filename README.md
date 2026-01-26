@@ -32,8 +32,6 @@ remote_repos:
     owner: "my-org"
     limit: 3 # Keep only the latest 3 versions in the index
 
-cache_file: "repo-cache.json"
-
 archive_info:
   origin: "my-repo"
   label: "my-repo"
@@ -51,7 +49,7 @@ archive_info:
 ```bash
 export GITHUB_TOKEN="your_token"
 export GPG_PRIVATE_KEY=$(cat private.key)
-go run apt-repo-builder.go -config apt-repo-config.yaml -out ./public
+go run main.go --config apt-repo-config.yaml --out ./public --cache-file repo-cache.json
 ```
 
 ### GitHub Actions

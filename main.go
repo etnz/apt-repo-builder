@@ -39,7 +39,6 @@ type ArchiveInfo struct {
 
 type Config struct {
 	RemoteRepos []RemoteRepo `yaml:"remote_repos"`
-	CacheFile   string       `yaml:"cache_file"`
 	ArchiveInfo ArchiveInfo  `yaml:"archive_info"`
 }
 
@@ -63,6 +62,7 @@ func main() {
 	// Define command line flags to mimic nfpm behavior
 	outDir := flag.String("out", "dist", "Output directory for the APT repository indices")
 	confPath := flag.String("config", "apt-repo-config.yaml", "Path to the repository configuration file")
+	cachePath := flag.String("cache-file", "repo-cache.json", "Path to the repository cache file")
 	flag.Parse()
 
 	// Read YAML configuration
@@ -78,11 +78,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	if config.CacheFile == "" {
-		config.CacheFile = "repo-cache.json"
-	}
-
-	loadCache(config.CacheFile)
+	loadCache(*cachePath)
 
 	os.MkdirAll(*outDir, 0755)
 	packagesPath := filepath.Join(*outDir, "Packages")
@@ -127,7 +123,7 @@ func main() {
 	}
 
 	pkgFile.Close()
-	saveCache(config.CacheFile)
+	saveCache(*cachePath)
 	generateAptIndices(config, *outDir)
 }
 
