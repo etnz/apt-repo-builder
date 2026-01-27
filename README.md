@@ -1,28 +1,81 @@
-# APT Repository Builder
+# apt-repo-builder
 
-A stateless, zero-infrastructure aggregator that transforms GitHub Releases into a fully functional APT repository.
+**apt-repo-builder** is a stateless, "serverless" tool that turns GitHub Releases into fully functional APT repositories.
 
-## Why?
+It decouples metadata from payload:
+*   **Metadata** (`Packages`, `Release`, `InRelease`) is hosted on a single named GitHub Release (e.g tag "repo").
+*   **Payloads** (`.deb` files) are served directly from GitHub's global CDN (via release asset URLs).
 
-Traditional APT repository managers (Aptly, Reprepro) are **stateful**. They require a local database and a persistent filesystem to track packages. This makes them difficult and "noisy" to use in modern CI/CD environments like GitHub Actions.
+For detailed CLI usage, environment variables, and configuration options, see the Documentation.
 
-**This tool is different:**
+## Use Case 1: The Project Maintainer
 
-* **Stateless:** No database required. The "Source of Truth" is your configuration file and your GitHub Releases.
+You build a tool (e.g., with GoReleaser or nfpm) and attach `.deb` files to your GitHub Releases. You want users to install and update your tool via `apt` without setting up complex infrastructure like Artifactory or Aptly.
 
-* **Native Go:** Handles `.deb` (ar/tar) parsing and GPG/OpenPGP signing natively. No `dpkg-deb` or `gpg` binary needed.
+### Workflow
+1.  Build your `.deb` package.
+2.  Run `apt-repo-builder push-deb` in your CI pipeline.
 
-* **CDN Powered:** The index points `apt` directly to GitHub's global CDN for binary downloads. You only host the small text indices.
+This command:
+1.  **Verifies** your local `.deb` against the existing repository (ensuring version immutability).
+2.  **Uploads** the `.deb` to your target Release.
+3.  **Regenerates and signs** the APT indices (`Packages`, `Release`, `InRelease`).
+4.  **Publishes** the indices to a specific "index" tag (e.g., `repo`).
 
-* **Fast:** Supports a JSON-based cache to skip re-downloading and re-scanning assets that haven't changed.
-
-## Installation
+### Example (GitHub Actions)
 
 ```bash
-go get github.com/youruser/apt-repo-builder
+# Assuming you have built ./dist/my-tool_1.0.0_amd64.deb
+apt-repo-builder push-deb \
+  --config apt-repo-builder.yaml \
+  --src ./dist \
+  --repo my-org/my-tool \
+  --tag v1.0.0 \
+  --index-tag repo
+```
+
+
+
+## Use Case 2: The Aggregator (Personal Repository)
+
+You want a single APT repository that contains your favorite tools (e.g., `cli/gh`, `sharkdp/bat`, `BurntSushi/ripgrep`), even if the authors don't provide an APT repo themselves.
+
+**apt-repo-builder** can scrape multiple GitHub projects, aggregate their releases, and build a master index for you.
+
+### Workflow
+1.  Define your sources in `apt-repo-builder.yaml`.
+2.  Run `apt-repo-builder index-all`.
+
+This command:
+1.  **Scrapes** the latest `.deb` assets from the configured GitHub projects.
+2.  **Downloads** metadata (caching heavily to avoid redownloading binaries).
+3.  **Builds** a unified APT index.
+4.  **Publishes** the index to your personal repository.
+
+### Configuration (`apt-repo-builder.yaml`)
+
+```yaml
+# Your repository metadata
+archive_info:
+  origin: "MyPersonalRepo"
+  label: "MyTools"
+  suite: "stable"
+  codename: "stable"
+  architectures: "amd64 arm64"
+  components: "main"
+  description: "My collection of essential CLI tools"
+
+# Projects to aggregate
+github_projects:
+  - owner: "cli"
+    name: "cli"
+  - owner: "sharkdp"
+    name: "bat"
 ```
 
 ## Configuration
+
+See [Documentation](Documentation.md) for full configuration reference.
 
 The builder uses a simple YAML configuration (`apt-repo-config.yaml`):
 
@@ -44,6 +97,8 @@ archive_info:
 
 ## Usage
 
+See [Documentation](Documentation.md) for full command reference.
+
 ### Local Execution
 
 ```bash
@@ -58,14 +113,14 @@ The tool is designed to run in a workflow. Every time it runs, it generates a fr
 
 ## Setup `apt` on the Client
 
-Once you have hosted the generated files (e.g., in a GitHub Release or GCS), users can add your repo:
+Once you have hosted the generated files users can add your repo:
 
 ```bash
 # 1. Add the GPG key
-curl -fsSL https://your-repo.com/public.key | sudo gpg --dearmor -o /etc/apt/keyrings/my-repo.gpg
+curl -fsSL https://github.com/<owner>/<repo>/releases/download/<index-tag>/public.key | sudo gpg --dearmor -o /etc/apt/keyrings/my-repo.gpg
 
 # 2. Add the source
-echo "deb [signed-by=/etc/apt/keyrings/my-repo.gpg] https://your-repo.com/stable ./" | sudo tee /etc/apt/sources.list.d/my-repo.list
+echo "deb [signed-by=/etc/apt/keyrings/my-repo.gpg] https://github.com/<owner>/<repo>/releases/download/<index-tag>/ ./" | sudo tee /etc/apt/sources.list.d/my-repo.list
 
 # 3. Update and install
 sudo apt update && sudo apt install my-app-binary

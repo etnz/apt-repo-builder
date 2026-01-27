@@ -1,338 +1,333 @@
 package main
 
 import (
-	"archive/tar"
-	"bytes"
-	"compress/gzip"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
-	"io"
-	"net/http"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 
-	"golang.org/x/crypto/openpgp"
-	"golang.org/x/crypto/openpgp/clearsign"
+	"github.com/etnz/apt-repo-builder/apt"
+	"github.com/etnz/apt-repo-builder/github"
 	"gopkg.in/yaml.v3"
 )
 
-type RemoteRepo struct {
-	Name  string `yaml:"name"`
-	Owner string `yaml:"owner" json:"owner"`
-	Limit int    `yaml:"limit" json:"limit"`
-}
-
-type ArchiveInfo struct {
-	Origin        string `yaml:"origin"`
-	Label         string `yaml:"label"`
-	Suite         string `yaml:"suite"`
-	Codename      string `yaml:"codename"`
-	Architectures string `yaml:"architectures"`
-	Components    string `yaml:"components"`
-	Description   string `yaml:"description"`
-}
-
+// Config is a business object holding the application's configuration.
 type Config struct {
-	RemoteRepos []RemoteRepo `yaml:"remote_repos"`
-	ArchiveInfo ArchiveInfo  `yaml:"archive_info"`
+	Repositories   []apt.RepoConfig
+	GithubProjects []github.Repo
+	ArchiveInfo    apt.ArchiveInfo
 }
 
-type CachedAsset struct {
-	SHA256  string `json:"sha256"`
-	Size    int64  `json:"size"`
-	Control string `json:"control"`
-}
-
-type GithubRelease struct {
-	TagName string `json:"tag_name"`
-	Assets  []struct {
-		Name               string `json:"name"`
-		BrowserDownloadURL string `json:"browser_download_url"`
-	} `json:"assets"`
-}
-
-var cache = make(map[string]CachedAsset)
+var cache = make(map[string]apt.CachedAsset)
 
 func main() {
-	// Define command line flags to mimic nfpm behavior
-	outDir := flag.String("out", "dist", "Output directory for the APT repository indices")
-	confPath := flag.String("config", "apt-repo-config.yaml", "Path to the repository configuration file")
-	cachePath := flag.String("cache-file", "repo-cache.json", "Path to the repository cache file")
-	flag.Parse()
-
-	// Read YAML configuration
-	confData, err := os.ReadFile(*confPath)
-	if err != nil {
-		fmt.Printf("Fatal: Could not read config: %v\n", err)
+	if len(os.Args) < 2 {
+		fmt.Println("Usage: apt-repo-builder <command> [flags]")
+		fmt.Println("Commands: index-all, push-deb")
 		os.Exit(1)
 	}
 
-	var config Config
-	if err := yaml.Unmarshal(confData, &config); err != nil {
-		fmt.Printf("Fatal: Parse error: %v\n", err)
+	switch os.Args[1] {
+	case "index-all":
+		indexAll(os.Args[2:])
+	case "push-deb":
+		pushDeb(os.Args[2:])
+	default:
+		fmt.Printf("Unknown command: %s\n", os.Args[1])
+		os.Exit(1)
+	}
+}
+
+func indexAll(args []string) {
+	fs := flag.NewFlagSet("index-all", flag.ExitOnError)
+	outDir := fs.String("out", "dist", "Output directory for indices")
+	confPath := fs.String("config", "apt-repo-builder.yaml", "Path to config file")
+	cachePath := fs.String("cache", "repo-cache.json", "Path to cache file")
+	repo := fs.String("repo", "", "Target GitHub repo (owner/name) to upload indices")
+	indexTag := fs.String("index-tag", "", "Tag to upload indices to")
+	fs.Parse(args)
+
+	// Read YAML configuration
+	config, err := decodeConfig(*confPath)
+	if err != nil {
+		fmt.Printf("Fatal: Could not read or parse config file %s: %v\n", *confPath, err)
 		os.Exit(1)
 	}
 
 	loadCache(*cachePath)
 
-	os.MkdirAll(*outDir, 0755)
-	packagesPath := filepath.Join(*outDir, "Packages")
-	pkgFile, err := os.Create(packagesPath)
-	if err != nil {
-		fmt.Printf("Fatal: Output error: %v\n", err)
+	if err := os.MkdirAll(*outDir, 0755); err != nil {
+		fmt.Printf("Fatal: Could not create output directory %s: %v\n", *outDir, err)
 		os.Exit(1)
 	}
-	defer pkgFile.Close()
 
 	fmt.Println("Building APT Repository Index...")
 
 	githubToken := os.Getenv("GITHUB_TOKEN")
+	gpgPrivateKey := os.Getenv("GPG_PRIVATE_KEY")
 
-	// Process Remotes
-	for _, repo := range config.RemoteRepos {
-		fmt.Printf("Scraping %s/%s...\n", repo.Owner, repo.Name)
-		releases, err := fetchGithubReleases(repo.Owner, repo.Name, githubToken)
+	urls := github.FetchAllDebURLs(config.GithubProjects, githubToken)
+	masterIndex, err := apt.IndexAll(config.Repositories, urls, cache, config.ArchiveInfo, gpgPrivateKey)
+	if err != nil {
+		fmt.Printf("Fatal: %v\n", err)
+		os.Exit(1)
+	}
+
+	saveCache(*cachePath)
+	masterIndex.SaveTo(*outDir)
+
+	// Upload Indices if requested
+	if *repo != "" && *indexTag != "" {
+		fmt.Printf("Uploading indices to %s @ %s...\n", *repo, *indexTag)
+		github.UploadRepoIndices(*repo, *indexTag, githubToken, masterIndex)
+	}
+}
+
+func pushDeb(args []string) {
+	fs := flag.NewFlagSet("push-deb", flag.ExitOnError)
+	confPath := fs.String("config", "apt-repo-builder.yaml", "Path to config file")
+	cachePath := fs.String("cache", "repo-cache.json", "Path to cache file")
+	srcDir := fs.String("src", "./build", "Directory containing local .deb files")
+	repo := fs.String("repo", "", "Target GitHub repo (owner/name)")
+	tag := fs.String("tag", "", "Target versioned release tag for binaries")
+	indexTag := fs.String("index-tag", "", "Tag to upload indices to")
+	// dryRun := fs.Bool("dry-run", false, "Run verification without upload")
+	fs.Parse(args)
+
+	if *repo == "" || *tag == "" || *indexTag == "" {
+		fmt.Println("Error: --repo, --tag, and --index-tag are required for push-deb")
+		os.Exit(1)
+	}
+
+	// Read Config
+	config, err := decodeConfig(*confPath)
+	if err != nil {
+		fmt.Printf("Fatal: Could not read config: %v\n", err)
+		os.Exit(1)
+	}
+
+	loadCache(*cachePath)
+	githubToken := os.Getenv("GITHUB_TOKEN")
+
+	// Build Master Index (from config)
+	urls := github.FetchAllDebURLs(config.GithubProjects, githubToken)
+	masterIndex, err := apt.IndexAll(config.Repositories, urls, cache, config.ArchiveInfo, "")
+	if err != nil {
+		fmt.Printf("Fatal: Failed to build master index: %v\n", err)
+		os.Exit(1)
+	}
+	// The current github repo being published to is also a standard apt repo.
+	currentRepo := apt.RepoConfig{
+		URL: fmt.Sprintf("https://github.com/%s/releases/download/%s", *repo, *indexTag),
+	}
+	// Fetch Remote Index (Packages)
+	currentRemoteIndex, err := apt.FetchPackageIndexFrom(currentRepo, cache)
+	if err != nil {
+		fmt.Printf("Warning: Could not fetch existing index (starting fresh): %v\n", err)
+		currentRemoteIndex = apt.NewPackageIndex()
+	}
+
+	// Validate and Prune Local Files
+	files, _ := filepath.Glob(filepath.Join(*srcDir, "*.deb"))
+	var toUpload []string
+	localIndex := apt.NewPackageIndex()
+
+	for _, f := range files {
+		pkg, skip, err := apt.ConflictFree(f, masterIndex)
 		if err != nil {
-			fmt.Printf("  Error: %v\n", err)
+			if strings.Contains(err.Error(), "version conflict") {
+				fmt.Printf("Fatal: %v\n", err)
+				os.Exit(1)
+			}
+			fmt.Printf("Skipping %s: %v\n", f, err)
+			continue
+		}
+		if skip {
+			fmt.Printf("Skipping %s (already published)\n", filepath.Base(f))
+			os.Remove(f) // Prune
 			continue
 		}
 
-		indexedCount := 0
-		for _, rel := range releases {
-			if indexedCount >= repo.Limit {
-				break
-			}
+		toUpload = append(toUpload, f)
 
-			for _, asset := range rel.Assets {
-				if strings.HasSuffix(asset.Name, ".deb") {
-					fmt.Printf("  + %s (%s)\n", asset.Name, rel.TagName)
-					if err := processPackage(asset.BrowserDownloadURL, pkgFile); err != nil {
-						fmt.Printf("    Error: %v\n", err)
-					} else {
-						indexedCount++
-					}
-					break
-				}
-			}
+		// Add to index
+		newPkg := github.PredictRemote(*repo, *tag, pkg)
+		if err := localIndex.Add(newPkg); err != nil {
+			fmt.Printf("Fatal: Failed to add package to local index: %v\n", err)
+			os.Exit(1)
 		}
 	}
 
-	pkgFile.Close()
+	// Reindex the currentRemote.
+	if err := currentRemoteIndex.Append(localIndex); err != nil {
+		fmt.Printf("Fatal: Failed to merge local index: %v\n", err)
+		os.Exit(1)
+	}
+	if err := currentRemoteIndex.ComputeIndices(config.ArchiveInfo, os.Getenv("GPG_PRIVATE_KEY")); err != nil {
+		fmt.Printf("Fatal: Failed to compute indices: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Upload All.
+	if err := github.PushDeb(*repo, *tag, *indexTag, githubToken, toUpload, currentRemoteIndex); err != nil {
+		fmt.Printf("Fatal: %v\n", err)
+		os.Exit(1)
+	}
+
 	saveCache(*cachePath)
-	generateAptIndices(config, *outDir)
 }
 
-func fetchGithubReleases(owner, repo, token string) ([]GithubRelease, error) {
-	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases", owner, repo)
-	req, _ := http.NewRequest("GET", url, nil)
-	if token != "" {
-		req.Header.Set("Authorization", "token "+token)
+func decodeConfig(path string) (*Config, error) {
+	// Internal DTOs for YAML deserialization
+	type yamlRepoConfig struct {
+		URL           string   `yaml:"url"`
+		Suite         string   `yaml:"suite"`
+		Component     string   `yaml:"component"`
+		Architectures []string `yaml:"architectures"`
+	}
+	type yamlArchiveInfo struct {
+		Origin        string `yaml:"origin"`
+		Label         string `yaml:"label"`
+		Suite         string `yaml:"suite"`
+		Codename      string `yaml:"codename"`
+		Architectures string `yaml:"architectures"`
+		Components    string `yaml:"components"`
+		Description   string `yaml:"description"`
+	}
+	type yamlGithubProject struct {
+		Name  string `yaml:"name"`
+		Owner string `yaml:"owner"`
+	}
+	type yamlConfig struct {
+		Repositories   []yamlRepoConfig    `yaml:"repositories"`
+		GithubProjects []yamlGithubProject `yaml:"github_projects"`
+		ArchiveInfo    yamlArchiveInfo     `yaml:"archive_info"`
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
 
-	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("GitHub API status %d", resp.StatusCode)
-	}
-
-	var releases []GithubRelease
-	if err := json.NewDecoder(resp.Body).Decode(&releases); err != nil {
+	var dto yamlConfig
+	if err := yaml.Unmarshal(data, &dto); err != nil {
 		return nil, err
 	}
-	return releases, nil
-}
 
-func processPackage(url string, w io.Writer) error {
-	if cached, ok := cache[url]; ok {
-		return writeStanza(w, cached.Control, url, cached.SHA256, cached.Size)
+	// Map DTO to business object
+	config := &Config{
+		ArchiveInfo: apt.ArchiveInfo{
+			Origin:        dto.ArchiveInfo.Origin,
+			Label:         dto.ArchiveInfo.Label,
+			Suite:         dto.ArchiveInfo.Suite,
+			Codename:      dto.ArchiveInfo.Codename,
+			Architectures: dto.ArchiveInfo.Architectures,
+			Components:    dto.ArchiveInfo.Components,
+			Description:   dto.ArchiveInfo.Description,
+		},
+		Repositories:   make([]apt.RepoConfig, len(dto.Repositories)),
+		GithubProjects: make([]github.Repo, len(dto.GithubProjects)),
 	}
-
-	resp, err := http.Get(url)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	tmp, err := os.CreateTemp("", "pkg-*.deb")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(tmp.Name())
-
-	hasher := sha256.New()
-	size, err := io.Copy(io.MultiWriter(tmp, hasher), resp.Body)
-	if err != nil {
-		return err
-	}
-	tmp.Close()
-
-	control, err := extractControl(tmp.Name())
-	if err != nil {
-		return err
-	}
-
-	sha := hex.EncodeToString(hasher.Sum(nil))
-	cache[url] = CachedAsset{SHA256: sha, Size: size, Control: control}
-
-	return writeStanza(w, control, url, sha, size)
-}
-
-func writeStanza(w io.Writer, control, filename, sha string, size int64) error {
-	fmt.Fprint(w, control)
-	if !strings.HasSuffix(control, "\n") {
-		fmt.Fprint(w, "\n")
-	}
-	fmt.Fprintf(w, "Filename: %s\nSize: %d\nSHA256: %s\n\n", filename, size, sha)
-	return nil
-}
-
-func extractControl(path string) (string, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-
-	magic := make([]byte, 8)
-	if _, err := f.Read(magic); err != nil || string(magic) != "!<arch>\n" {
-		return "", fmt.Errorf("not a debian archive")
-	}
-
-	for {
-		header := make([]byte, 60)
-		if _, err := io.ReadFull(f, header); err != nil {
-			if err == io.EOF {
-				break
-			}
-			return "", err
-		}
-
-		name := strings.TrimSpace(string(header[0:16]))
-		sizeStr := strings.TrimSpace(string(header[48:58]))
-		size, _ := strconv.ParseInt(sizeStr, 10, 64)
-
-		if strings.HasPrefix(name, "control.tar") {
-			limited := io.LimitReader(f, size)
-			var tr *tar.Reader
-
-			if strings.HasSuffix(name, ".gz") || strings.HasSuffix(name, ".gz/") {
-				gzr, err := gzip.NewReader(limited)
-				if err != nil {
-					return "", err
-				}
-				defer gzr.Close()
-				tr = tar.NewReader(gzr)
-			} else {
-				return "", fmt.Errorf("unsupported compression: %s (need .gz)", name)
-			}
-
-			for {
-				th, err := tr.Next()
-				if err == io.EOF {
-					break
-				}
-				if err != nil {
-					return "", err
-				}
-				if filepath.Base(th.Name) == "control" {
-					var buf bytes.Buffer
-					io.Copy(&buf, tr)
-					return buf.String(), nil
-				}
-			}
-		}
-
-		if size%2 != 0 {
-			size++
-		}
-		f.Seek(size, io.SeekCurrent)
-	}
-	return "", fmt.Errorf("control file missing")
-}
-
-func generateAptIndices(config Config, outputDir string) {
-	fmt.Println("Finalizing indices...")
-
-	pkgPath := filepath.Join(outputDir, "Packages")
-	gzPath := pkgPath + ".gz"
-
-	// Gzip Packages
-	pData, _ := os.ReadFile(pkgPath)
-	f, _ := os.Create(gzPath)
-	gw := gzip.NewWriter(f)
-	gw.Write(pData)
-	gw.Close()
-	f.Close()
-
-	// Release File
-	relPath := filepath.Join(outputDir, "Release")
-	rf, _ := os.Create(relPath)
-	i := config.ArchiveInfo
-	fmt.Fprintf(rf, "Origin: %s\nLabel: %s\nSuite: %s\nCodename: %s\nArchitectures: %s\nComponents: %s\nDescription: %s\nSHA256:\n",
-		i.Origin, i.Label, i.Suite, i.Codename, i.Architectures, i.Components, i.Description)
-
-	for _, name := range []string{"Packages", "Packages.gz"} {
-		d, _ := os.ReadFile(filepath.Join(outputDir, name))
-		h := sha256.Sum256(d)
-		fmt.Fprintf(rf, " %x %d %s\n", h, len(d), name)
-	}
-	rf.Close()
-
-	// Signing
-	key := os.Getenv("GPG_PRIVATE_KEY")
-	if key != "" {
-		if err := sign(relPath, key, filepath.Join(outputDir, "InRelease")); err != nil {
-			fmt.Printf("Signing failed: %v\n", err)
-		} else {
-			fmt.Println("Successfully signed InRelease.")
+	for i, r := range dto.Repositories {
+		config.Repositories[i] = apt.RepoConfig{
+			URL:           r.URL,
+			Suite:         r.Suite,
+			Component:     r.Component,
+			Architectures: r.Architectures,
 		}
 	}
-}
-
-func sign(inputPath, key, outputPath string) error {
-	entities, err := openpgp.ReadArmoredKeyRing(strings.NewReader(key))
-	if err != nil {
-		return err
-	}
-	var signer *openpgp.Entity
-	for _, e := range entities {
-		if e.PrivateKey != nil {
-			signer = e
-			break
+	for i, p := range dto.GithubProjects {
+		config.GithubProjects[i] = github.Repo{
+			Name:  p.Name,
+			Owner: p.Owner,
 		}
 	}
-	if signer == nil {
-		return fmt.Errorf("no private key")
+
+	return config, nil
+}
+
+func decodeCache(path string) (map[string]apt.CachedAsset, error) {
+	type jsonCachedAsset struct {
+		ContentHash string `json:"content_hash"`
+		FileHash    string `json:"file_hash"`
+		Size        int64  `json:"size"`
+		Control     string `json:"control"`
+		URL         string `json:"url"`
 	}
 
-	out, _ := os.Create(outputPath)
-	defer out.Close()
-	w, err := clearsign.Encode(out, signer.PrivateKey, nil)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return make(map[string]apt.CachedAsset), nil
+		}
+		return nil, err
+	}
+
+	var internalCache map[string]jsonCachedAsset
+	if err := json.Unmarshal(data, &internalCache); err != nil {
+		// Corrupt cache is not a fatal error, just start fresh.
+		fmt.Printf("Warning: could not parse cache file %s: %v. Starting fresh.\n", path, err)
+		return make(map[string]apt.CachedAsset), nil
+	}
+
+	// Map from DTO to business object
+	cache := make(map[string]apt.CachedAsset, len(internalCache))
+	for url, asset := range internalCache {
+		cache[url] = apt.CachedAsset{
+			ContentHash: asset.ContentHash,
+			FileHash:    asset.FileHash,
+			Size:        asset.Size,
+			Control:     asset.Control,
+			URL:         asset.URL,
+		}
+	}
+	return cache, nil
+}
+
+func encodeCache(path string, cache map[string]apt.CachedAsset) error {
+	type jsonCachedAsset struct {
+		ContentHash string `json:"content_hash"`
+		FileHash    string `json:"file_hash"`
+		Size        int64  `json:"size"`
+		Control     string `json:"control"`
+		URL         string `json:"url"`
+	}
+
+	// Map from business object to DTO
+	internalCache := make(map[string]jsonCachedAsset, len(cache))
+	for url, asset := range cache {
+		internalCache[url] = jsonCachedAsset{
+			ContentHash: asset.ContentHash,
+			FileHash:    asset.FileHash,
+			Size:        asset.Size,
+			Control:     asset.Control,
+			URL:         asset.URL,
+		}
+	}
+
+	data, err := json.MarshalIndent(internalCache, "", "  ")
 	if err != nil {
 		return err
 	}
-	content, _ := os.ReadFile(inputPath)
-	w.Write(content)
-	return w.Close()
+
+	return os.WriteFile(path, data, 0644)
 }
 
 func loadCache(path string) {
-	d, err := os.ReadFile(path)
-	if err == nil {
-		json.Unmarshal(d, &cache)
+	var err error
+	cache, err = decodeCache(path)
+	if err != nil {
+		// This error is not fatal, just means we have no cache.
+		// The decoder function already handles os.IsNotExist and parsing errors.
+		fmt.Printf("Warning: could not load cache from %s: %v. Starting fresh.\n", path, err)
+		cache = make(map[string]apt.CachedAsset)
 	}
 }
 
 func saveCache(path string) {
-	d, _ := json.MarshalIndent(cache, "", "  ")
-	os.WriteFile(path, d, 0644)
+	if err := encodeCache(path, cache); err != nil {
+		fmt.Printf("Warning: could not save cache to %s: %v\n", path, err)
+	}
 }
