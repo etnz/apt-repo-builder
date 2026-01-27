@@ -1,0 +1,73 @@
+name: 'apt-repo-builder'
+description: 'Stateless, serverless APT repository manager for GitHub Releases'
+author: 'etnz'
+inputs:
+  command:
+    description: 'Command to run (index-all or push-deb)'
+    required: true
+    default: 'push-deb'
+  config:
+    description: 'Path to apt-repo-builder.yaml'
+    required: false
+    default: 'apt-repo-builder.yaml'
+  args:
+    description: 'Additional arguments for the command'
+    required: false
+  github_token:
+    description: 'GitHub Token'
+    required: true
+  gpg_private_key:
+    description: 'GPG Private Key'
+    required: false
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Download Binary
+      shell: bash
+      run: |
+        echo "Installing apt-repo-builder..."
+        
+        # Detect architecture
+        ARCH=$(uname -m)
+        if [ "$ARCH" = "x86_64" ]; then 
+          ARCH_TAG="x86_64"
+        elif [ "$ARCH" = "aarch64" ]; then 
+          ARCH_TAG="arm64"
+        else
+          echo "Architecture $ARCH not supported."
+          exit 1
+        fi
+        
+        # Fetch the latest release asset URL from GitHub API
+        # We target the Linux tarball matching the detected architecture
+        DOWNLOAD_URL=$(curl -s https://api.github.com/repos/etnz/apt-repo-builder/releases/latest \
+          | grep "browser_download_url" \
+          | grep "Linux_${ARCH_TAG}.tar.gz" \
+          | cut -d '"' -f 4)
+        
+        if [ -z "$DOWNLOAD_URL" ]; then
+          echo "Error: Could not find a release asset for Linux_${ARCH_TAG}"
+          exit 1
+        fi
+
+        # Download and extract the binary
+        curl -sL "$DOWNLOAD_URL" | tar xz
+        
+        # Ensure the binary is executable and moved to the path
+        chmod +x apt-repo-builder
+        sudo mv apt-repo-builder /usr/local/bin/apt-repo-builder
+        
+        echo "apt-repo-builder installed successfully."
+    
+    - name: Run apt-repo-builder
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github_token }}
+        GPG_PRIVATE_KEY: ${{ inputs.gpg_private_key }}
+      run: |
+        apt-repo-builder ${{ inputs.command }} --config ${{ inputs.config }} ${{ inputs.args }}
+
+branding:
+  icon: 'package'
+  color: 'blue'
