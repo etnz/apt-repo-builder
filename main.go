@@ -25,7 +25,7 @@ var cache = make(map[string]apt.CachedAsset)
 func main() {
 	if len(os.Args) < 2 {
 		fmt.Println("Usage: apt-repo-builder <command> [flags]")
-		fmt.Println("Commands: index-all, push-deb")
+		fmt.Println("Commands: index-all, push-deb, index-local")
 		os.Exit(1)
 	}
 
@@ -34,6 +34,8 @@ func main() {
 		indexAll(os.Args[2:])
 	case "push-deb":
 		pushDeb(os.Args[2:])
+	case "index-local":
+		indexLocal(os.Args[2:])
 	default:
 		fmt.Printf("Unknown command: %s\n", os.Args[1])
 		os.Exit(1)
@@ -135,7 +137,7 @@ func pushDeb(args []string) {
 	localIndex := apt.NewPackageIndex()
 
 	for _, f := range files {
-		pkg, skip, err := apt.ConflictFree(f, masterIndex)
+		pkg, free, err := apt.ConflictFree(f, masterIndex)
 		if err != nil {
 			if strings.Contains(err.Error(), "version conflict") {
 				fmt.Printf("Fatal: %v\n", err)
@@ -144,7 +146,7 @@ func pushDeb(args []string) {
 			fmt.Printf("Skipping %s: %v\n", f, err)
 			continue
 		}
-		if skip {
+		if !free {
 			fmt.Printf("Skipping %s (already published)\n", filepath.Base(f))
 			os.Remove(f) // Prune
 			continue
@@ -176,6 +178,63 @@ func pushDeb(args []string) {
 		os.Exit(1)
 	}
 
+	saveCache(*cachePath)
+}
+
+func indexLocal(args []string) {
+	fs := flag.NewFlagSet("index-local", flag.ExitOnError)
+	confPath := fs.String("config", "apt-repo-builder.yaml", "Path to config file")
+	cachePath := fs.String("cache", "repo-cache.json", "Path to cache file")
+	distDir := fs.String("dist", "dist", "Directory containing .deb files")
+	fs.Parse(args)
+
+	// Read Config
+	config, err := decodeConfig(*confPath)
+	if err != nil {
+		fmt.Printf("Fatal: Could not read config: %v\n", err)
+		os.Exit(1)
+	}
+
+	loadCache(*cachePath)
+
+	// Build Master Index (from config)
+	githubToken := os.Getenv("GITHUB_TOKEN")
+	urls := github.FetchAllDebURLs(config.GithubProjects, githubToken)
+	masterIndex, err := apt.IndexAll(config.Repositories, urls, cache, config.ArchiveInfo, "")
+	if err != nil {
+		fmt.Printf("Fatal: Failed to build master index: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Scan local files
+	files, _ := filepath.Glob(filepath.Join(*distDir, "*.deb"))
+	localIndex := apt.NewPackageIndex()
+
+	for _, f := range files {
+		pkg, free, err := apt.ConflictFree(f, masterIndex)
+		if err != nil {
+			fmt.Printf("Warning: Failed to read %s: %v\n", f, err)
+			continue
+		}
+
+		if !free {
+			// Package is in conflict with the master index it cannot be added to the local index.
+			fmt.Printf("Skipping %s (conflicts with existing package in master index)\n", filepath.Base(f))
+			continue
+		}
+
+		if err := localIndex.Add(pkg); err != nil {
+			fmt.Printf("Fatal: Failed to add package to local index: %v\n", err)
+			os.Exit(1)
+		}
+	}
+
+	if err := localIndex.ComputeIndices(config.ArchiveInfo, os.Getenv("GPG_PRIVATE_KEY")); err != nil {
+		fmt.Printf("Fatal: Failed to compute indices: %v\n", err)
+		os.Exit(1)
+	}
+
+	localIndex.SaveTo(*distDir)
 	saveCache(*cachePath)
 }
 

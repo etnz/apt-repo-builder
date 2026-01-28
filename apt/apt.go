@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/ProtonMail/go-crypto/openpgp"
 	"github.com/ProtonMail/go-crypto/openpgp/armor"
@@ -132,11 +133,12 @@ func (p *Package) ContentHash() (string, error) {
 type PackageIndex struct {
 	packages map[string]*Package // Key: Name|Version|Architecture
 
-	PackagesContent   []byte
-	PackagesGzContent []byte
-	ReleaseContent    []byte
-	InReleaseContent  []byte
-	PublicKeyContent  []byte
+	PackagesContent         []byte
+	PackagesGzContent       []byte
+	ReleaseContent          []byte
+	InReleaseContent        []byte
+	PublicKeyContent        []byte
+	PublicKeyContentArmored []byte
 }
 
 func NewPackageIndex() *PackageIndex {
@@ -524,8 +526,8 @@ func (idx *PackageIndex) ComputeIndices(i ArchiveInfo, gpgKey string) error {
 
 	// 3. Generate Release
 	var relBuf bytes.Buffer
-	fmt.Fprintf(&relBuf, "Origin: %s\nLabel: %s\nSuite: %s\nCodename: %s\nArchitectures: %s\nComponents: %s\nDescription: %s\nSHA256:\n",
-		i.Origin, i.Label, i.Suite, i.Codename, i.Architectures, i.Components, i.Description)
+	fmt.Fprintf(&relBuf, "Origin: %s\nLabel: %s\nSuite: %s\nCodename: %s\nDate: %s\nArchitectures: %s\nComponents: %s\nDescription: %s\nSHA256:\n",
+		i.Origin, i.Label, i.Suite, i.Codename, time.Now().UTC().Format(time.RFC1123Z), i.Architectures, i.Components, i.Description)
 
 	// Hash Packages
 	hPkg := sha256.Sum256(idx.PackagesContent)
@@ -544,12 +546,18 @@ func (idx *PackageIndex) ComputeIndices(i ArchiveInfo, gpgKey string) error {
 			return fmt.Errorf("signing failed: %w", err)
 		}
 		idx.InReleaseContent = signed
-
-		pubKey, err := extractPublicKey(gpgKey)
+		pubKey, err := extractPublicKey(gpgKey, false)
 		if err != nil {
 			return fmt.Errorf("failed to extract public key: %w", err)
 		}
 		idx.PublicKeyContent = pubKey
+
+		pubKeyArmored, err := extractPublicKey(gpgKey, true)
+		if err != nil {
+			return fmt.Errorf("failed to extract armored public key: %w", err)
+		}
+		idx.PublicKeyContentArmored = pubKeyArmored
+
 	}
 	return nil
 }
@@ -615,7 +623,7 @@ func ConflictFree(path string, masterIndex *PackageIndex) (*Package, bool, error
 		Version:      v,
 		Architecture: a,
 		Control:      control,
-		Filename:     path,
+		Filename:     filepath.Base(path),
 		Size:         stat.Size(),
 		FileHash:     fileHash,
 		contentHash:  contentHash,
@@ -646,7 +654,10 @@ func (idx *PackageIndex) SaveTo(outputDir string) error {
 		os.WriteFile(filepath.Join(outputDir, "InRelease"), idx.InReleaseContent, 0644)
 	}
 	if len(idx.PublicKeyContent) > 0 {
-		os.WriteFile(filepath.Join(outputDir, "public.key"), idx.PublicKeyContent, 0644)
+		os.WriteFile(filepath.Join(outputDir, "public.gpg"), idx.PublicKeyContent, 0644)
+	}
+	if len(idx.PublicKeyContentArmored) > 0 {
+		os.WriteFile(filepath.Join(outputDir, "public.asc"), idx.PublicKeyContentArmored, 0644)
 	}
 	return nil
 }
@@ -677,7 +688,7 @@ func signBytes(input []byte, key string) ([]byte, error) {
 	return out.Bytes(), nil
 }
 
-func extractPublicKey(key string) ([]byte, error) {
+func extractPublicKey(key string, armored bool) ([]byte, error) {
 	entities, err := openpgp.ReadArmoredKeyRing(strings.NewReader(key))
 	if err != nil {
 		return nil, err
@@ -694,13 +705,19 @@ func extractPublicKey(key string) ([]byte, error) {
 	}
 
 	var buf bytes.Buffer
-	w, err := armor.Encode(&buf, openpgp.PublicKeyType, nil)
-	if err != nil {
-		return nil, err
+	if armored {
+		w, err := armor.Encode(&buf, openpgp.PublicKeyType, nil)
+		if err != nil {
+			return nil, err
+		}
+		if err := signer.Serialize(w); err != nil {
+			return nil, err
+		}
+		w.Close()
+	} else {
+		if err := signer.Serialize(&buf); err != nil {
+			return nil, err
+		}
 	}
-	if err := signer.Serialize(w); err != nil {
-		return nil, err
-	}
-	w.Close()
 	return buf.Bytes(), nil
 }
