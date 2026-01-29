@@ -653,7 +653,7 @@ func AddPackage(path string, masterIndex *PackageIndex) (pkg *Package, fresh boo
 		}
 		return pkg, false, nil // Package exists and are identical.
 	}
-	return pkg, fresh, nil
+	return pkg, true, nil
 }
 
 // SaveTo writes the generated index files (Packages, Release, etc.) to a local directory.
