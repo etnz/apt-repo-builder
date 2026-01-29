@@ -504,12 +504,12 @@ func extractControl(path string) (string, error) {
 	return "", fmt.Errorf("control file missing")
 }
 
-// ComputeIndices generates the standard APT repository metadata files in memory.
+// Index generates the standard APT repository metadata files in memory.
 // 1. Packages: The text index of all packages.
 // 2. Packages.gz: Compressed index.
 // 3. Release: Metadata about the repository and hashes of the indices.
 // 4. InRelease: GPG-signed version of the Release file.
-func (idx *PackageIndex) ComputeIndices(i ArchiveInfo, gpgKey string) error {
+func (idx *PackageIndex) Index(i ArchiveInfo, gpgKey string) error {
 	// 1. Generate Packages
 	var pkgBuf bytes.Buffer
 	for _, p := range idx.packages {
@@ -562,10 +562,10 @@ func (idx *PackageIndex) ComputeIndices(i ArchiveInfo, gpgKey string) error {
 	return nil
 }
 
-// IndexAll is the high-level aggregator.
+// IndexWorld is the high-level aggregator.
 // It fetches indices from standard repos and individual .deb files from URLs,
 // merges them into a master index, and computes the final repository metadata.
-func IndexAll(repos []RepoConfig, debURLs []string, cache map[string]CachedAsset, info ArchiveInfo, gpgKey string) (*PackageIndex, error) {
+func IndexWorld(repos []RepoConfig, debURLs []string, cache map[string]CachedAsset, info ArchiveInfo, gpgKey string) (*PackageIndex, error) {
 	masterIndex := NewPackageIndex()
 
 	// 1. Harvest Standard Repositories
@@ -593,21 +593,33 @@ func IndexAll(repos []RepoConfig, debURLs []string, cache map[string]CachedAsset
 	}
 
 	// 3. Compute Indices
-	if err := masterIndex.ComputeIndices(info, gpgKey); err != nil {
+	if err := masterIndex.Index(info, gpgKey); err != nil {
 		return nil, fmt.Errorf("failed to compute indices: %w", err)
 	}
 
 	return masterIndex, nil
 }
 
-// ConflictFree checks if a local .deb file is safe to upload.
-// It verifies that if the version already exists in the master index, the content is identical.
-// This enforces the "Immutability Principle": you cannot overwrite a version with different code.
-func ConflictFree(path string, masterIndex *PackageIndex) (*Package, bool, error) {
+// AddPackage loads a Package from a local .deb file and checks for conflicts against a master index.
+// It verifies if there is a pre-existing package with same version and same architecture in the master index.
+// In that case, the local file should not be pushed upstream. This enforces Immutability of published packages.
+//
+// However, when building .deb files locally it is sometimes hard to know if it deserves a version bump.
+// For a single package repository it is straightforward, the .deb version should just follow the github release tag version.
+// For a multi-package repository it is more complex, as multiple packages may be built from the same source code, some .debs
+// may not change between releases, and some packages may be built from external source code (e.g., upstream .debs).
+// In these difficult cases, this function computes the content hash of the package payload (debian-binary + control + data)
+// and compares it against the published version.
+// If the content hash not match, it means that this package is new, and cannot be pushed without a version bump.
+// The function returns an error in this case, along with a 'false' boolean value.
+func AddPackage(path string, masterIndex *PackageIndex) (pkg *Package, fresh bool, err error) {
+	// Read local info.
 	fileHash, contentHash, err := CalculateHashes(path)
 	if err != nil {
 		return nil, false, fmt.Errorf("invalid file: %w", err)
 	}
+
+	// Create the package object.
 
 	control, err := extractControl(path)
 	if err != nil {
@@ -615,10 +627,10 @@ func ConflictFree(path string, masterIndex *PackageIndex) (*Package, bool, error
 	}
 
 	p, v, a := parseControlMetadata(control)
-	id := fmt.Sprintf("%s|%s|%s", p, v, a)
+	id := fmt.Sprintf("%s|%s|%s", p, v, a) // TODO the simple but critical index key function should be centralized.
 
 	stat, _ := os.Stat(path)
-	pkg := &Package{
+	pkg = &Package{
 		Name:         p,
 		Version:      v,
 		Architecture: a,
@@ -631,15 +643,17 @@ func ConflictFree(path string, masterIndex *PackageIndex) (*Package, bool, error
 
 	// Validate against Master Index (Config)
 	if masterPkg, exists := masterIndex.packages[id]; exists {
+		// This package already exists remotely, verify that the local one does not provide new content that
+		// would be skipped due to same version number.
 		masterContentHash, err := masterPkg.ContentHash()
 		if err != nil {
 			return pkg, false, fmt.Errorf("could not verify master package %s: %w", id, err)
 		} else if masterContentHash != contentHash {
 			return pkg, false, fmt.Errorf("version conflict for %s %s (%s). Master hash differs", p, v, a)
 		}
+		return pkg, false, nil // Package exists and are identical.
 	}
-
-	return pkg, true, nil
+	return pkg, fresh, nil
 }
 
 // SaveTo writes the generated index files (Packages, Release, etc.) to a local directory.

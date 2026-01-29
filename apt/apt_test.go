@@ -216,7 +216,7 @@ func TestComputeIndices(t *testing.T) {
 	}
 
 	// Test without GPG
-	if err := idx.ComputeIndices(info, ""); err != nil {
+	if err := idx.Index(info, ""); err != nil {
 		t.Fatalf("ComputeIndices failed: %v", err)
 	}
 	if len(idx.PackagesContent) == 0 || len(idx.ReleaseContent) == 0 {
@@ -237,7 +237,7 @@ func TestComputeIndices(t *testing.T) {
 	w.Close()
 	privKey := keyBuf.String()
 
-	if err := idx.ComputeIndices(info, privKey); err != nil {
+	if err := idx.Index(info, privKey); err != nil {
 		t.Fatalf("ComputeIndices with key failed: %v", err)
 	}
 	if len(idx.InReleaseContent) == 0 {
@@ -256,7 +256,7 @@ func TestConflictFree(t *testing.T) {
 	masterIdx := NewPackageIndex()
 
 	// Case 1: New package (not in master)
-	pkg, ok, err := ConflictFree(path, masterIdx)
+	pkg, ok, err := AddPackage(path, masterIdx)
 	if err != nil {
 		t.Errorf("ConflictFree failed for new pkg: %v", err)
 	}
@@ -269,7 +269,7 @@ func TestConflictFree(t *testing.T) {
 
 	// Case 2: Existing package, same content
 	masterIdx.Add(pkg)
-	pkg2, ok, err := ConflictFree(path, masterIdx)
+	pkg2, ok, err := AddPackage(path, masterIdx)
 	if err != nil {
 		t.Errorf("ConflictFree failed for existing pkg: %v", err)
 	}
@@ -284,7 +284,7 @@ func TestConflictFree(t *testing.T) {
 	// Manually corrupt the content hash in master index to simulate conflict
 	pkg.contentHash = "corrupted"
 
-	_, ok, err = ConflictFree(path, masterIdx)
+	_, ok, err = AddPackage(path, masterIdx)
 	if err == nil {
 		t.Error("Expected error for conflict")
 	}

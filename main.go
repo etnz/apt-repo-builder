@@ -15,40 +15,41 @@ import (
 
 // Config is a business object holding the application's configuration.
 type Config struct {
-	Repositories   []apt.RepoConfig
-	GithubProjects []github.Repo
-	ArchiveInfo    apt.ArchiveInfo
+	// Upstream is the list of APT repositories to use for integrity checks (The Upstream World)
+	Upstream []apt.RepoConfig
+	// ProjectSources is the list of GitHub projects to be indexed (The Project World)
+	ProjectSources []github.Repo
+	// ArchiveInfo is the metadata to use when generating a new the APT repository.
+	ArchiveInfo apt.ArchiveInfo
 }
 
+// cache is an in-memory cache of previously fetched .deb files.
 var cache = make(map[string]apt.CachedAsset)
 
 func main() {
 	if len(os.Args) < 2 {
 		fmt.Println("Usage: apt-repo-builder <command> [flags]")
-		fmt.Println("Commands: index-all, push-deb, index-local")
+		fmt.Println("Commands: index, add")
 		os.Exit(1)
 	}
 
 	switch os.Args[1] {
-	case "index-all":
-		indexAll(os.Args[2:])
-	case "push-deb":
-		pushDeb(os.Args[2:])
-	case "index-local":
-		indexLocal(os.Args[2:])
+	case "index":
+		indexProject(os.Args[2:])
+	case "add":
+		addDeb(os.Args[2:])
 	default:
 		fmt.Printf("Unknown command: %s\n", os.Args[1])
 		os.Exit(1)
 	}
 }
 
-func indexAll(args []string) {
-	fs := flag.NewFlagSet("index-all", flag.ExitOnError)
+func indexProject(args []string) {
+	fs := flag.NewFlagSet("index", flag.ExitOnError)
 	outDir := fs.String("out", "dist", "Output directory for indices")
 	confPath := fs.String("config", "apt-repo-builder.yaml", "Path to config file")
 	cachePath := fs.String("cache", "repo-cache.json", "Path to cache file")
-	repo := fs.String("repo", "", "Target GitHub repo (owner/name) to upload indices")
-	indexTag := fs.String("index-tag", "", "Tag to upload indices to")
+	to := fs.String("to", "", "Target GitHub repo slug (github.com/owner/repo/tags/tag)")
 	fs.Parse(args)
 
 	// Read YAML configuration
@@ -65,43 +66,43 @@ func indexAll(args []string) {
 		os.Exit(1)
 	}
 
-	fmt.Println("Building APT Repository Index...")
+	fmt.Println("Building World Index...")
 
 	githubToken := os.Getenv("GITHUB_TOKEN")
 	gpgPrivateKey := os.Getenv("GPG_PRIVATE_KEY")
 
-	urls := github.FetchAllDebURLs(config.GithubProjects, githubToken)
-	masterIndex, err := apt.IndexAll(config.Repositories, urls, cache, config.ArchiveInfo, gpgPrivateKey)
+	urls := github.FetchAllDebs(config.ProjectSources, githubToken)
+	worldIndex, err := apt.IndexWorld(config.Upstream, urls, cache, config.ArchiveInfo, gpgPrivateKey)
 	if err != nil {
 		fmt.Printf("Fatal: %v\n", err)
 		os.Exit(1)
 	}
 
 	saveCache(*cachePath)
-	masterIndex.SaveTo(*outDir)
+	worldIndex.SaveTo(*outDir)
 
 	// Upload Indices if requested
-	if *repo != "" && *indexTag != "" {
-		fmt.Printf("Uploading indices to %s @ %s...\n", *repo, *indexTag)
-		github.UploadRepoIndices(*repo, *indexTag, githubToken, masterIndex)
+	if *to != "" {
+		owner, repo, tag, err := parseSlug(*to)
+		if err != nil {
+			fmt.Printf("Fatal: Invalid slug: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("Uploading indices to %s/%s @ %s...\n", owner, repo, tag)
+		github.UploadIndex(fmt.Sprintf("%s/%s", owner, repo), tag, githubToken, worldIndex)
 	}
 }
 
-func pushDeb(args []string) {
-	fs := flag.NewFlagSet("push-deb", flag.ExitOnError)
+func addDeb(args []string) {
+	fs := flag.NewFlagSet("add", flag.ExitOnError)
 	confPath := fs.String("config", "apt-repo-builder.yaml", "Path to config file")
 	cachePath := fs.String("cache", "repo-cache.json", "Path to cache file")
 	srcDir := fs.String("src", "./build", "Directory containing local .deb files")
-	repo := fs.String("repo", "", "Target GitHub repo (owner/name)")
-	tag := fs.String("tag", "", "Target versioned release tag for binaries")
-	indexTag := fs.String("index-tag", "", "Tag to upload indices to")
-	// dryRun := fs.Bool("dry-run", false, "Run verification without upload")
-	fs.Parse(args)
+	to := fs.String("to", "", "Target GitHub release slug (github.com/owner/repo/tags/tag)")
+	localIndexFlag := fs.Bool("local-index", false, "Generate a local-only index for valid ingress files")
+	prune := fs.Bool("prune", false, "Remove invalid/duplicate local debs")
 
-	if *repo == "" || *tag == "" || *indexTag == "" {
-		fmt.Println("Error: --repo, --tag, and --index-tag are required for push-deb")
-		os.Exit(1)
-	}
+	fs.Parse(args)
 
 	// Read Config
 	config, err := decodeConfig(*confPath)
@@ -113,129 +114,76 @@ func pushDeb(args []string) {
 	loadCache(*cachePath)
 	githubToken := os.Getenv("GITHUB_TOKEN")
 
-	// Build Master Index (from config)
-	urls := github.FetchAllDebURLs(config.GithubProjects, githubToken)
-	masterIndex, err := apt.IndexAll(config.Repositories, urls, cache, config.ArchiveInfo, "")
+	// Build World Index
+	urls := github.FetchAllDebs(config.ProjectSources, githubToken)
+	worldIndex, err := apt.IndexWorld(config.Upstream, urls, cache, config.ArchiveInfo, "")
 	if err != nil {
-		fmt.Printf("Fatal: Failed to build master index: %v\n", err)
+		fmt.Printf("Fatal: Failed to build world index: %v\n", err)
 		os.Exit(1)
 	}
-	// The current github repo being published to is also a standard apt repo.
-	currentRepo := apt.RepoConfig{
-		URL: fmt.Sprintf("https://github.com/%s/releases/download/%s", *repo, *indexTag),
-	}
-	// Fetch Remote Index (Packages)
-	currentRemoteIndex, err := apt.FetchPackageIndexFrom(currentRepo, cache)
-	if err != nil {
-		fmt.Printf("Warning: Could not fetch existing index (starting fresh): %v\n", err)
-		currentRemoteIndex = apt.NewPackageIndex()
-	}
 
-	// Validate and Prune Local Files
-	files, _ := filepath.Glob(filepath.Join(*srcDir, "*.deb"))
-	var toUpload []string
+	// Prepare local index.
 	localIndex := apt.NewPackageIndex()
 
+	// Validate and Prune Local Files.
+	files, _ := filepath.Glob(filepath.Join(*srcDir, "*.deb"))
+	var toUpload []string
+
 	for _, f := range files {
-		pkg, free, err := apt.ConflictFree(f, masterIndex)
+		pkg, fresh, err := apt.AddPackage(f, worldIndex)
 		if err != nil {
-			if strings.Contains(err.Error(), "version conflict") {
-				fmt.Printf("Fatal: %v\n", err)
-				os.Exit(1)
-			}
-			fmt.Printf("Skipping %s: %v\n", f, err)
-			continue
+			fmt.Printf("Fatal: %v\n", err)
+			os.Exit(1)
 		}
-		if !free {
-			fmt.Printf("Skipping %s (already published)\n", filepath.Base(f))
-			os.Remove(f) // Prune
+		if !fresh {
+			fmt.Printf("Already published with same content, skipping %s\n", filepath.Base(f))
+			if *prune {
+				os.Remove(f)
+			}
 			continue
 		}
 
 		toUpload = append(toUpload, f)
 
-		// Add to index
-		newPkg := github.PredictRemote(*repo, *tag, pkg)
-		if err := localIndex.Add(newPkg); err != nil {
+		if err := localIndex.Add(pkg); err != nil {
 			fmt.Printf("Fatal: Failed to add package to local index: %v\n", err)
 			os.Exit(1)
 		}
+
 	}
 
-	// Reindex the currentRemote.
-	if err := currentRemoteIndex.Append(localIndex); err != nil {
-		fmt.Printf("Fatal: Failed to merge local index: %v\n", err)
-		os.Exit(1)
-	}
-	if err := currentRemoteIndex.ComputeIndices(config.ArchiveInfo, os.Getenv("GPG_PRIVATE_KEY")); err != nil {
-		fmt.Printf("Fatal: Failed to compute indices: %v\n", err)
-		os.Exit(1)
+	if *localIndexFlag {
+		if err := localIndex.Index(config.ArchiveInfo, os.Getenv("GPG_PRIVATE_KEY")); err != nil {
+			fmt.Printf("Fatal: Failed to compute indices: %v\n", err)
+			os.Exit(1)
+		}
+		localIndex.SaveTo(*srcDir)
 	}
 
-	// Upload All.
-	if err := github.PushDeb(*repo, *tag, *indexTag, githubToken, toUpload, currentRemoteIndex); err != nil {
-		fmt.Printf("Fatal: %v\n", err)
-		os.Exit(1)
+	if *to != "" {
+		owner, repoName, tag, err := parseSlug(*to)
+		if err != nil {
+			fmt.Printf("Fatal: Invalid slug: %v\n", err)
+			os.Exit(1)
+		}
+		repo := fmt.Sprintf("%s/%s", owner, repoName)
+
+		if err := github.PushDeb(repo, tag, githubToken, toUpload); err != nil {
+			fmt.Printf("Fatal: %v\n", err)
+			os.Exit(1)
+		}
 	}
 
 	saveCache(*cachePath)
 }
 
-func indexLocal(args []string) {
-	fs := flag.NewFlagSet("index-local", flag.ExitOnError)
-	confPath := fs.String("config", "apt-repo-builder.yaml", "Path to config file")
-	cachePath := fs.String("cache", "repo-cache.json", "Path to cache file")
-	distDir := fs.String("dist", "dist", "Directory containing .deb files")
-	fs.Parse(args)
-
-	// Read Config
-	config, err := decodeConfig(*confPath)
-	if err != nil {
-		fmt.Printf("Fatal: Could not read config: %v\n", err)
-		os.Exit(1)
+func parseSlug(slug string) (owner, repo, tag string, err error) {
+	// github.com/owner/repo/tags/tag
+	parts := strings.Split(slug, "/")
+	if len(parts) < 5 || parts[0] != "github.com" || parts[3] != "tags" {
+		return "", "", "", fmt.Errorf("invalid slug format, expected github.com/owner/repo/tags/tag")
 	}
-
-	loadCache(*cachePath)
-
-	// Build Master Index (from config)
-	githubToken := os.Getenv("GITHUB_TOKEN")
-	urls := github.FetchAllDebURLs(config.GithubProjects, githubToken)
-	masterIndex, err := apt.IndexAll(config.Repositories, urls, cache, config.ArchiveInfo, "")
-	if err != nil {
-		fmt.Printf("Fatal: Failed to build master index: %v\n", err)
-		os.Exit(1)
-	}
-
-	// Scan local files
-	files, _ := filepath.Glob(filepath.Join(*distDir, "*.deb"))
-	localIndex := apt.NewPackageIndex()
-
-	for _, f := range files {
-		pkg, free, err := apt.ConflictFree(f, masterIndex)
-		if err != nil {
-			fmt.Printf("Warning: Failed to read %s: %v\n", f, err)
-			continue
-		}
-
-		if !free {
-			// Package is in conflict with the master index it cannot be added to the local index.
-			fmt.Printf("Skipping %s (conflicts with existing package in master index)\n", filepath.Base(f))
-			continue
-		}
-
-		if err := localIndex.Add(pkg); err != nil {
-			fmt.Printf("Fatal: Failed to add package to local index: %v\n", err)
-			os.Exit(1)
-		}
-	}
-
-	if err := localIndex.ComputeIndices(config.ArchiveInfo, os.Getenv("GPG_PRIVATE_KEY")); err != nil {
-		fmt.Printf("Fatal: Failed to compute indices: %v\n", err)
-		os.Exit(1)
-	}
-
-	localIndex.SaveTo(*distDir)
-	saveCache(*cachePath)
+	return parts[1], parts[2], parts[4], nil
 }
 
 func decodeConfig(path string) (*Config, error) {
@@ -255,14 +203,16 @@ func decodeConfig(path string) (*Config, error) {
 		Components    string `yaml:"components"`
 		Description   string `yaml:"description"`
 	}
-	type yamlGithubProject struct {
-		Name  string `yaml:"name"`
-		Owner string `yaml:"owner"`
+	type yamlProject struct {
+		ArchiveInfo yamlArchiveInfo `yaml:"archive_info"`
+		Sources     []string        `yaml:"sources"`
+	}
+	type yamlUpstream struct {
+		Sources []yamlRepoConfig `yaml:"sources"`
 	}
 	type yamlConfig struct {
-		Repositories   []yamlRepoConfig    `yaml:"repositories"`
-		GithubProjects []yamlGithubProject `yaml:"github_projects"`
-		ArchiveInfo    yamlArchiveInfo     `yaml:"archive_info"`
+		Project  yamlProject  `yaml:"project"`
+		Upstream yamlUpstream `yaml:"upstream"`
 	}
 
 	data, err := os.ReadFile(path)
@@ -278,29 +228,35 @@ func decodeConfig(path string) (*Config, error) {
 	// Map DTO to business object
 	config := &Config{
 		ArchiveInfo: apt.ArchiveInfo{
-			Origin:        dto.ArchiveInfo.Origin,
-			Label:         dto.ArchiveInfo.Label,
-			Suite:         dto.ArchiveInfo.Suite,
-			Codename:      dto.ArchiveInfo.Codename,
-			Architectures: dto.ArchiveInfo.Architectures,
-			Components:    dto.ArchiveInfo.Components,
-			Description:   dto.ArchiveInfo.Description,
+			Origin:        dto.Project.ArchiveInfo.Origin,
+			Label:         dto.Project.ArchiveInfo.Label,
+			Suite:         dto.Project.ArchiveInfo.Suite,
+			Codename:      dto.Project.ArchiveInfo.Codename,
+			Architectures: dto.Project.ArchiveInfo.Architectures,
+			Components:    dto.Project.ArchiveInfo.Components,
+			Description:   dto.Project.ArchiveInfo.Description,
 		},
-		Repositories:   make([]apt.RepoConfig, len(dto.Repositories)),
-		GithubProjects: make([]github.Repo, len(dto.GithubProjects)),
+		Upstream:       make([]apt.RepoConfig, len(dto.Upstream.Sources)),
+		ProjectSources: make([]github.Repo, len(dto.Project.Sources)),
 	}
-	for i, r := range dto.Repositories {
-		config.Repositories[i] = apt.RepoConfig{
+	for i, r := range dto.Upstream.Sources {
+		config.Upstream[i] = apt.RepoConfig{
 			URL:           r.URL,
 			Suite:         r.Suite,
 			Component:     r.Component,
 			Architectures: r.Architectures,
 		}
 	}
-	for i, p := range dto.GithubProjects {
-		config.GithubProjects[i] = github.Repo{
-			Name:  p.Name,
-			Owner: p.Owner,
+	for i, s := range dto.Project.Sources {
+		// Parse "https://github.com/owner/repo"
+		trimmed := strings.TrimPrefix(s, "https://")
+		trimmed = strings.TrimPrefix(trimmed, "http://")
+		parts := strings.Split(trimmed, "/")
+		if len(parts) >= 3 && parts[0] == "github.com" {
+			config.ProjectSources[i] = github.Repo{
+				Owner: parts[1],
+				Name:  parts[2],
+			}
 		}
 	}
 

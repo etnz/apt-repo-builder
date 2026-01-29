@@ -135,10 +135,10 @@ func uploadAssetFromReader(repoSlug, tag, fileName string, content io.Reader, si
 	return nil
 }
 
-// UploadRepoIndices uploads the generated APT metadata files (Packages, Release, InRelease)
+// UploadIndex uploads the generated APT metadata files (Packages, Release, InRelease)
 // to a specific GitHub Release tag. This effectively updates the repository index
 // hosted on GitHub.
-func UploadRepoIndices(repoSlug, tag, token string, idx *apt.PackageIndex) error {
+func UploadIndex(repoSlug, tag, token string, idx *apt.PackageIndex) error {
 	// Check completeness
 	if len(idx.ReleaseContent) == 0 {
 		return fmt.Errorf("incomplete repository: Release missing")
@@ -181,18 +181,18 @@ func PredictRemote(repo, tag string, localPkg *apt.Package) *apt.Package {
 // PushDeb performs the component-level publish operation:
 // 1. Uploads the .deb binaries to the target Release.
 // 2. Uploads the updated repository indices to the index Release.
-func PushDeb(repoSlug, tag, indexTag, token string, files []string, idx *apt.PackageIndex) error {
+func PushDeb(repoSlug, tag, token string, files []string) error {
 	for _, f := range files {
 		fmt.Printf("Uploading binary %s to %s...\n", filepath.Base(f), tag)
 		if err := uploadAsset(repoSlug, tag, f, token); err != nil {
 			return fmt.Errorf("error uploading binary %s: %w", f, err)
 		}
 	}
-	return UploadRepoIndices(repoSlug, indexTag, token, idx)
+	return nil
 }
 
-// FetchAllDebURLs aggregates .deb download URLs from multiple GitHub repositories.
-func FetchAllDebURLs(projects []Repo, token string) []string {
+// FetchAllDebs aggregates .deb download URLs from multiple GitHub repositories.
+func FetchAllDebs(projects []Repo, token string) []string {
 	var urls []string
 	for _, proj := range projects {
 		fmt.Printf("Scraping %s/%s...\n", proj.Owner, proj.Name)

@@ -176,7 +176,7 @@ func TestFetchAllDebURLs(t *testing.T) {
 		{Owner: "owner2", Name: "repo2"},
 	}
 
-	urls := FetchAllDebURLs(projects, "dummy-token")
+	urls := FetchAllDebs(projects, "dummy-token")
 
 	if len(urls) != 2 {
 		t.Errorf("Expected 2 URLs, got %d", len(urls))
@@ -215,16 +215,8 @@ func TestPushDeb(t *testing.T) {
 	debPath := filepath.Join(tmpDir, "test.deb")
 	os.WriteFile(debPath, []byte("binary-content"), 0644)
 
-	// Create dummy index
-	idx := &apt.PackageIndex{
-		PackagesContent:   []byte("packages-content"),
-		PackagesGzContent: []byte("packages-gz-content"),
-		ReleaseContent:    []byte("release-content"),
-		InReleaseContent:  []byte("inrelease-content"),
-	}
-
 	// Execute
-	err := PushDeb(owner+"/"+repo, tag, indexTag, "dummy-token", []string{debPath}, idx)
+	err := PushDeb(owner+"/"+repo, tag, "dummy-token", []string{debPath})
 	if err != nil {
 		t.Fatalf("PushDeb failed: %v", err)
 	}
@@ -272,7 +264,7 @@ func TestPushDeb(t *testing.T) {
 
 func TestUploadRepoIndices_Incomplete(t *testing.T) {
 	idx := &apt.PackageIndex{} // Empty
-	err := UploadRepoIndices("o/r", "tag", "tok", idx)
+	err := UploadIndex("o/r", "tag", "tok", idx)
 	if err == nil || !strings.Contains(err.Error(), "incomplete repository") {
 		t.Errorf("Expected incomplete error, got %v", err)
 	}
