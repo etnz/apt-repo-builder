@@ -108,8 +108,15 @@ apt-repo-builder add [flags]
 
 ## Configuration File (`apt-repo-builder.yaml`)
 
+The configuration file defines the metadata for your repository and the sources you want to include.
+
+### JSON Schema & Autocomplete
+
+You can enable autocomplete and validation in editors like VS Code by referencing the JSON schema. Add the following comment to the top of your YAML file.
+
 
 ```yaml
+# yaml-language-server: $schema=./apt-repo-builder.schema.json
 # Configuration for apt-repo-builder
 
 # Project configuration: Defines your repository identity and sources.
