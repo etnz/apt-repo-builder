@@ -28,14 +28,3 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Update Major Tag
-        run: |
-          git config user.name github-actions
-          git config user.email github-actions@github.com
-          TAG=${GITHUB_REF#refs/tags/}
-          MAJOR=${TAG%%.*}
-          if [[ "$TAG" == *"."* ]]; then
-            git tag -fa $MAJOR -m "Update $MAJOR tag"
-            git push origin $MAJOR --force
-          fi

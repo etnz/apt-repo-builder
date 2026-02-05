@@ -1,5 +1,4 @@
-# This is the configuration for GoReleaser: https://goreleaser.com/
-project_name: apt-repo-builder
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
 
 before:
   hooks:
@@ -8,21 +7,8 @@ before:
 builds:
   - env:
       - CGO_ENABLED=0
-    main: ./main.go
-    binary: apt-repo-builder
-    goos:
-      - linux
-    goarch:
-      - amd64
-      - arm64
+    main: ./cmd/deb-pm/main.go
+    binary: deb-pm
 
 archives:
-  - format: tar.gz
-    name_template: >-
-      {{ .ProjectName }}_{{ .Version }}_{{ title .Os }}_{{ if eq .Arch "amd64" }}x86_64{{ else }}{{ .Arch }}{{ end }}
-
-checksum:
-  name_template: 'checksums.txt'
-
-changelog:
-  sort: asc
+  - format: binary
