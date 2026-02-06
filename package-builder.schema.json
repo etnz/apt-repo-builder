@@ -1,0 +1,77 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Packagefile",
+  "description": "Definition of a Debian package",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "input": {
+      "type": "string",
+      "description": "Path to an optional source .deb package to patch"
+    },
+    "defines": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      },
+      "description": "Local variables available to templates"
+    },
+    "meta": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      },
+      "description": "Fields to set or override in the package control file (e.g. Package, Version, Depends)"
+    },
+    "injects": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/file"
+      },
+      "description": "Files to add to the package payload"
+    },
+    "scripts": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/file"
+      },
+      "description": "Maintainer scripts to add. 'dst' must be one of: preinst, postinst, prerm, postrm, config"
+    },
+    "control_files": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/file"
+      },
+      "description": "Auxiliary control files to add (e.g. triggers, templates)"
+    }
+  },
+  "definitions": {
+    "file": {
+      "type": "object",
+      "required": ["src", "dst"],
+      "additionalProperties": false,
+      "properties": {
+        "src": {
+          "type": "string",
+          "description": "Path to the source file (relative to the package file)"
+        },
+        "dst": {
+          "type": "string",
+          "description": "Absolute path on target system, or script name"
+        },
+        "raw": {
+          "type": "boolean",
+          "description": "If true, treat file as raw content (no templating)"
+        },
+        "mode": {
+          "type": "string",
+          "description": "File permissions in octal string format (e.g. '0755')"
+        },
+        "conffile": {
+          "type": "boolean",
+          "description": "Mark as configuration file (dpkg will prompt on overwrite)"
+        }
+      }
+    }
+  }
+}

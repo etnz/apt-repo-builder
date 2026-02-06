@@ -5,6 +5,7 @@ go 1.25.5
 require (
 	github.com/ProtonMail/go-crypto v1.3.0
 	github.com/blakesmith/ar v0.0.0-20190502131153-809d4375e1fb
+	go.yaml.in/yaml/v3 v3.0.4
 )
 
 require (

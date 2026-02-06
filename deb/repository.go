@@ -8,6 +8,8 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -81,7 +83,7 @@ type ArchiveInfo struct {
 	AcquireByHash string
 }
 
-// Repository represents a collection of packages (local, remote, or generated)
+// Repository represents a collection of packages
 // that will be assembled into a flat APT repository.
 //
 // Reference: https://wiki.debian.org/DebianRepository/Format#Flat_Repository_Format
@@ -105,14 +107,27 @@ func (r *Repository) Get(name, version, arch string) *Package {
 	return nil
 }
 
-// AddStrict adds a package to the repository. It fails if a package with the
-// same name, version, and architecture already exists.
-func (r *Repository) AddStrict(pkg *Package) error {
+// Append adds a package to the repository.
+// If there is no conflicting package, it appends the new package and returns (nil, nil).
+// If the existing package is identical to the new one, it returns the existing package and a nil error.
+// If the existing package is different, it returns the existing package and an error.
+func (r *Repository) Append(pkg *Package) (*Package, error) {
 	if existing := r.Get(pkg.Metadata.Package, pkg.Metadata.Version, pkg.Metadata.Architecture); existing != nil {
-		return fmt.Errorf("package %s version %s for %s already exists", pkg.Metadata.Package, pkg.Metadata.Version, pkg.Metadata.Architecture)
+		if existing.Equal(pkg) {
+			return existing, nil
+		}
+		// f1, _ := os.CreateTemp("", "existing-*.txt")
+		// f1.WriteString(existing.String())
+		// f1.Close()
+		// f2, _ := os.CreateTemp("", "new-*.txt")
+		// f2.WriteString(pkg.String())
+		// f2.Close()
+		// fmt.Printf("existing: %s\nnew: %s\n", f1.Name(), f2.Name())
+
+		return existing, fmt.Errorf("package %s version %s for %s already exists", pkg.Metadata.Package, pkg.Metadata.Version, pkg.Metadata.Architecture)
 	}
 	r.Packages = append(r.Packages, pkg)
-	return nil
+	return nil, nil
 }
 
 // AddOverwrite adds a package to the repository, replacing any existing package
@@ -286,6 +301,77 @@ func (r *Repository) WriteTo(w io.Writer) (int64, error) {
 	return cw.n, nil
 }
 
+// WriteToDir generates the repository and writes it to the provided directory path.
+func (r *Repository) WriteToDir(path string) error {
+	if err := os.MkdirAll(path, 0755); err != nil {
+		return err
+	}
+
+	var index []*repoPackage
+
+	// Process Packages
+	for _, pkg := range r.Packages {
+		var buf bytes.Buffer
+		if _, err := pkg.WriteTo(&buf); err != nil {
+			return fmt.Errorf("building package: %w", err)
+		}
+		content := buf.Bytes()
+
+		rp, err := parseDeb(content, "")
+		if err != nil {
+			return fmt.Errorf("parsing package: %w", err)
+		}
+
+		rp.Filename = fmt.Sprintf("%s_%s_%s.deb", rp.Package, rp.Version, rp.Architecture)
+		if err := os.WriteFile(filepath.Join(path, rp.Filename), content, 0644); err != nil {
+			return err
+		}
+
+		index = append(index, rp)
+	}
+
+	// Generate Indices
+	packagesContent := generatePackagesFile(index)
+	if err := os.WriteFile(filepath.Join(path, "Packages"), packagesContent, 0644); err != nil {
+		return err
+	}
+
+	var gzBuf bytes.Buffer
+	gw := gzip.NewWriter(&gzBuf)
+	gw.Write(packagesContent)
+	gw.Close()
+	packagesGzContent := gzBuf.Bytes()
+	if err := os.WriteFile(filepath.Join(path, "Packages.gz"), packagesGzContent, 0644); err != nil {
+		return err
+	}
+
+	releaseContent := generateReleaseFile(r.ArchiveInfo, packagesContent, packagesGzContent)
+	if err := os.WriteFile(filepath.Join(path, "Release"), releaseContent, 0644); err != nil {
+		return err
+	}
+
+	if r.GPGKey != "" {
+		inRelease, err := signBytes(releaseContent, r.GPGKey)
+		if err != nil {
+			return fmt.Errorf("signing InRelease: %w", err)
+		}
+		if err := os.WriteFile(filepath.Join(path, "InRelease"), inRelease, 0644); err != nil {
+			return err
+		}
+
+		pubKey, err := extractPublicKey(r.GPGKey, false)
+		if err == nil {
+			os.WriteFile(filepath.Join(path, "public.gpg"), pubKey, 0644)
+		}
+		pubKeyAsc, err := extractPublicKey(r.GPGKey, true)
+		if err == nil {
+			os.WriteFile(filepath.Join(path, "public.asc"), pubKeyAsc, 0644)
+		}
+	}
+
+	return nil
+}
+
 // NewRepository creates a Repository from a tar.gz stream.
 func NewRepository(r io.Reader) (*Repository, error) {
 	gzr, err := gzip.NewReader(r)
@@ -331,6 +417,74 @@ func NewRepository(r io.Reader) (*Repository, error) {
 				return nil, err
 			}
 			pkgs, err := parsePackagesIndex(buf.String())
+			if err != nil {
+				return nil, fmt.Errorf("parsing Packages: %w", err)
+			}
+			externalPkgs = pkgs
+		}
+	}
+
+	// Merge external packages
+	existing := make(map[string]bool)
+	for _, p := range repo.Packages {
+		key := fmt.Sprintf("%s_%s_%s", p.Metadata.Package, p.Metadata.Version, p.Metadata.Architecture)
+		existing[key] = true
+	}
+
+	for _, p := range externalPkgs {
+		key := fmt.Sprintf("%s_%s_%s", p.Metadata.Package, p.Metadata.Version, p.Metadata.Architecture)
+		if !existing[key] {
+			repo.Packages = append(repo.Packages, p)
+		}
+	}
+
+	return repo, nil
+}
+
+// NewRepositoryFromDir creates a Repository from a directory.
+func NewRepositoryFromDir(path string) (*Repository, error) {
+	repo := &Repository{
+		Packages: []*Package{},
+	}
+	var externalPkgs []*Package
+
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		fullPath := filepath.Join(path, name)
+
+		if name == "Release" {
+			content, err := os.ReadFile(fullPath)
+			if err != nil {
+				return nil, err
+			}
+			if err := parseReleaseFile(string(content), &repo.ArchiveInfo); err != nil {
+				return nil, fmt.Errorf("parsing Release: %w", err)
+			}
+		} else if strings.HasSuffix(name, ".deb") {
+			f, err := os.Open(fullPath)
+			if err != nil {
+				return nil, err
+			}
+			pkg, err := NewPackage(f)
+			f.Close()
+			if err != nil {
+				return nil, fmt.Errorf("parsing %s: %w", name, err)
+			}
+			repo.Packages = append(repo.Packages, pkg)
+		} else if name == "Packages" {
+			content, err := os.ReadFile(fullPath)
+			if err != nil {
+				return nil, err
+			}
+			pkgs, err := parsePackagesIndex(string(content))
 			if err != nil {
 				return nil, fmt.Errorf("parsing Packages: %w", err)
 			}

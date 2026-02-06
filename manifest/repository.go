@@ -1,0 +1,147 @@
+// Package manifest provides functionality to define and build APT repositories using declarative configuration files.
+package manifest
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"github.com/etnz/apt-repo-builder/deb"
+	"go.yaml.in/yaml/v3"
+)
+
+// NewRepository loads and parses a Repository configuration from the specified file path.
+// It supports both JSON and YAML formats based on the file extension.
+func NewRepository(path string) (*Repository, error) {
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read archivefile: %w", err)
+	}
+
+	var archive Repository
+	if err := unmarshal(path, content, &archive); err != nil {
+		return nil, fmt.Errorf("failed to parse archivefile: %w", err)
+	}
+
+	archive.filePath = path
+	archive.engine = newTemplateEngine(archive.Defines)
+
+	if archive.Path == "" {
+		return nil, fmt.Errorf("archivefile must specify 'repo'")
+	}
+	return &archive, nil
+}
+
+// Repository represents the configuration for an APT repository archive.
+// It defines the output directory, global variables, and the list of packages to include.
+type Repository struct {
+	// Path is the directory path where the repository will be generated.
+	Path string `json:"path" yaml:"path"`
+	// Defines is a map of global variables available to templates.
+	Defines map[string]string `json:"defines" yaml:"defines"`
+	// Packages is a list of paths to package definition files to include in the repository.
+	Packages []string `json:"packages" yaml:"packages"`
+
+	filePath string
+	engine   *templateEngine
+}
+
+// LoadRepository initializes the underlying deb.Repository from the configured Path.
+// If the directory does not exist, it creates a new empty repository in memory.
+func (a *Repository) LoadRepository() (*deb.Repository, error) {
+	repo, err := deb.NewRepositoryFromDir(a.resolve(a.Path))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return &deb.Repository{
+				ArchiveInfo: deb.ArchiveInfo{
+					Origin: "deb-pm",
+					Label:  "Managed Repository",
+				},
+			}, nil
+		}
+		return nil, err
+	}
+	return repo, nil
+}
+
+// LoadPackages reads and parses all package definition files listed in the configuration.
+// It resolves paths relative to the Repository file and initializes template engines for each package.
+func (a *Repository) LoadPackages() ([]Package, error) {
+	var pkgs []Package
+
+	for _, pkgFile := range a.Packages {
+		pkgPath := a.resolve(pkgFile)
+		pkgContent, err := a.loadResource(pkgFile)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read package definition %s: %v", pkgPath, err)
+		}
+
+		var pkg Package
+		if err := unmarshal(pkgPath, []byte(pkgContent), &pkg); err != nil {
+			return nil, fmt.Errorf("failed to parse package definition %s: %v", pkgPath, err)
+		}
+
+		pkg.filePath = pkgPath
+		pkg.engine = a.engine.sub(pkg.Defines)
+		pkgs = append(pkgs, pkg)
+	}
+
+	return pkgs, nil
+}
+
+// Compile orchestrates the repository building process.
+// It loads the repository, processes all packages, applies them, and saves the result.
+func (a *Repository) Compile() error {
+	repo, err := a.LoadRepository()
+	if err != nil {
+		return fmt.Errorf("failed to load repo: %w", err)
+	}
+
+	pkgs, err := a.LoadPackages()
+	if err != nil {
+		return fmt.Errorf("failed to load packages: %w", err)
+	}
+
+	for _, pkg := range pkgs {
+		if err := pkg.Apply(repo); err != nil {
+			return fmt.Errorf("failed to apply package: %w", err)
+		}
+	}
+
+	if err := a.SaveRepository(repo); err != nil {
+		return fmt.Errorf("failed to save repo: %w", err)
+	}
+	return nil
+}
+
+// SaveRepository writes the current state of the deb.Repository to the configured Path.
+func (a *Repository) SaveRepository(repo *deb.Repository) error {
+	return repo.WriteToDir(a.resolve(a.Path))
+}
+
+func (a *Repository) resolve(path string) string {
+	if filepath.IsAbs(path) {
+		return path
+	}
+	return filepath.Join(filepath.Dir(a.filePath), path)
+}
+
+func (a *Repository) loadResource(path string) (string, error) {
+	resolved := a.resolve(path)
+	content, err := os.ReadFile(resolved)
+	if err != nil {
+		return "", err
+	}
+	return string(content), nil
+}
+
+// unmarshal parses JSON or YAML based on file extension.
+func unmarshal(path string, data []byte, v interface{}) error {
+	ext := strings.ToLower(filepath.Ext(path))
+	if ext == ".yaml" || ext == ".yml" {
+		return yaml.Unmarshal(data, v)
+	}
+	return json.Unmarshal(data, v)
+}

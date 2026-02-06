@@ -1,0 +1,30 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Repositoryfile",
+  "description": "Configuration for building an APT repository",
+  "type": "object",
+  "required": [
+    "path"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "path": {
+      "type": "string",
+      "description": "Directory path where the repository will be generated"
+    },
+    "defines": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      },
+      "description": "Global variables available to templates"
+    },
+    "packages": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "List of paths to package definition files"
+    }
+  }
+}

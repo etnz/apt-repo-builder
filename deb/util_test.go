@@ -63,6 +63,7 @@ func TestAddBufferToAr(t *testing.T) {
 
 // Helper to create a mock .deb byte slice
 func createMockDebBytes(t *testing.T, controlContent string) []byte {
+	t.Helper()
 	var buf bytes.Buffer
 	arW := ar.NewWriter(&buf)
 	arW.WriteGlobalHeader()

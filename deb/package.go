@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"crypto/md5"
+	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -697,4 +698,113 @@ func NewPackage(r io.Reader) (*Package, error) {
 	}
 
 	return pkg, nil
+}
+
+// Digest computes a deterministic SHA256 hash of the package content.
+// It includes metadata, scripts, and file contents, but excludes file modification times
+// and is insensitive to the order of files in the payload.
+func (p *Package) Digest() string {
+	// Ensure Installed-Size is up to date.
+	var installedSize int64
+	for _, f := range p.Files {
+		installedSize += int64(len(f.Body))
+	}
+	kbytes := (installedSize + 1023) / 1024
+	p.Set(string(FieldInstalledSize), fmt.Sprintf("%d", kbytes))
+
+	h := sha256.New()
+
+	// write appends a length-prefixed string to the hash to ensure uniqueness.
+	write := func(s string) {
+		fmt.Fprintf(h, "%d:%s\x00", len(s), s)
+	}
+
+	// 1. Metadata
+	// Standard fields
+	write(p.Metadata.Package)
+	write(p.Metadata.Version)
+	write(p.Metadata.Architecture)
+	write(p.Metadata.Maintainer)
+	write(p.Metadata.Description)
+	write(p.Metadata.Section)
+	write(p.Metadata.Priority)
+	write(p.Metadata.Homepage)
+	write(fmt.Sprintf("%v", p.Metadata.Essential))
+	write(p.Metadata.BuiltUsing)
+	write(p.Metadata.Source)
+
+	// List fields (Order matters)
+	lists := [][]string{
+		p.Metadata.Depends,
+		p.Metadata.PreDepends,
+		p.Metadata.Recommends,
+		p.Metadata.Suggests,
+		p.Metadata.Enhances,
+		p.Metadata.Conflicts,
+		p.Metadata.Breaks,
+		p.Metadata.Replaces,
+		p.Metadata.Provides,
+	}
+	for _, list := range lists {
+		write(fmt.Sprintf("%d", len(list)))
+		for _, v := range list {
+			write(v)
+		}
+	}
+
+	// ExtraFields (Sorted by key)
+	var extraKeys []string
+	for k := range p.Metadata.ExtraFields {
+		extraKeys = append(extraKeys, k)
+	}
+	sort.Strings(extraKeys)
+	for _, k := range extraKeys {
+		write(k)
+		write(p.Metadata.ExtraFields[k])
+	}
+
+	// 2. Scripts
+	write(p.Scripts.PreInst)
+	write(p.Scripts.PostInst)
+	write(p.Scripts.PreRm)
+	write(p.Scripts.PostRm)
+	write(p.Scripts.Config)
+
+	// 3. ExtraControlFiles (Sorted by key)
+	var controlKeys []string
+	for k := range p.ExtraControlFiles {
+		controlKeys = append(controlKeys, k)
+	}
+	sort.Strings(controlKeys)
+	for _, k := range controlKeys {
+		write(k)
+		write(p.ExtraControlFiles[k])
+	}
+
+	// 4. Files (Sorted by DestPath)
+	files := make([]File, len(p.Files))
+	copy(files, p.Files)
+	sort.Slice(files, func(i, j int) bool {
+		return files[i].DestPath < files[j].DestPath
+	})
+
+	for _, f := range files {
+		write(f.DestPath)
+		write(fmt.Sprintf("%d", f.Mode))
+		write(fmt.Sprintf("%v", f.IsConf))
+		write(f.Body)
+	}
+
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// Equal compares two packages for data equality using their Digest.
+func (p *Package) Equal(other *Package) bool {
+	if p == nil && other == nil {
+		return true
+	}
+	if p == nil || other == nil {
+		return false
+	}
+	return p.Digest() == other.Digest()
 }
