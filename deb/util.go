@@ -453,11 +453,8 @@ func parsePackagesIndex(content string) ([]*Package, error) {
 			return nil, err
 		}
 
-		// Extract Filename from ExtraFields if present
-		if fn, ok := pkg.Metadata.ExtraFields["Filename"]; ok {
-			pkg.ExternalURL = fn
-			delete(pkg.Metadata.ExtraFields, "Filename")
-		}
+		delete(pkg.Metadata.ExtraFields, "Filename")
+
 		// Clean up other index-only fields from ExtraFields
 		delete(pkg.Metadata.ExtraFields, "Size")
 		delete(pkg.Metadata.ExtraFields, "SHA256")

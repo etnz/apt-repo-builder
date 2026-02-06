@@ -355,16 +355,9 @@ Filename: http://example.com/pkg2.deb
 		t.Fatalf("expected 2 packages, got %d", len(pkgs))
 	}
 
-	if pkgs[0].ExternalURL != "pool/main/p/pkg1/pkg1.deb" {
-		t.Errorf("expected pkg1 ExternalURL pool/main/p/pkg1/pkg1.deb, got %s", pkgs[0].ExternalURL)
-	}
 	// Check that Size/SHA256 were removed from ExtraFields
 	if _, ok := pkgs[0].Metadata.ExtraFields["Size"]; ok {
 		t.Error("Size field should be removed from ExtraFields")
-	}
-
-	if pkgs[1].ExternalURL != "http://example.com/pkg2.deb" {
-		t.Errorf("expected pkg2 ExternalURL http://example.com/pkg2.deb, got %s", pkgs[1].ExternalURL)
 	}
 }
 

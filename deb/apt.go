@@ -229,14 +229,11 @@ func (r *Repository) WriteTo(w io.Writer) (int64, error) {
 			return cw.n, fmt.Errorf("parsing package: %w", err)
 		}
 
-		if pkg.ExternalURL != "" {
-			rp.Filename = pkg.ExternalURL
-		} else {
-			rp.Filename = fmt.Sprintf("%s_%s_%s.deb", rp.Package, rp.Version, rp.Architecture)
-			if err := addFile(rp.Filename, content); err != nil {
-				return cw.n, err
-			}
+		rp.Filename = fmt.Sprintf("%s_%s_%s.deb", rp.Package, rp.Version, rp.Architecture)
+		if err := addFile(rp.Filename, content); err != nil {
+			return cw.n, err
 		}
+
 		index = append(index, rp)
 	}
 
@@ -422,23 +419,19 @@ func (r *StandardRepository) WriteTo(w io.Writer) (int64, error) {
 				return cw.n, fmt.Errorf("parsing package: %w", err)
 			}
 
-			if pkg.ExternalURL != "" {
-				rp.Filename = pkg.ExternalURL
-			} else {
-				pkgName := rp.Package
-				if pkgName == "" {
-					pkgName = "unknown"
-				}
-				poolPath := fmt.Sprintf("pool/%s/%s/%s", comp, pkgName, fmt.Sprintf("%s_%s_%s.deb", rp.Package, rp.Version, rp.Architecture))
-
-				if !poolFiles[poolPath] {
-					if err := addFile(poolPath, content); err != nil {
-						return cw.n, err
-					}
-					poolFiles[poolPath] = true
-				}
-				rp.Filename = poolPath
+			pkgName := rp.Package
+			if pkgName == "" {
+				pkgName = "unknown"
 			}
+			poolPath := fmt.Sprintf("pool/%s/%s/%s", comp, pkgName, fmt.Sprintf("%s_%s_%s.deb", rp.Package, rp.Version, rp.Architecture))
+
+			if !poolFiles[poolPath] {
+				if err := addFile(poolPath, content); err != nil {
+					return cw.n, err
+				}
+				poolFiles[poolPath] = true
+			}
+			rp.Filename = poolPath
 			index = append(index, rp)
 		}
 

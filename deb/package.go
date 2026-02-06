@@ -23,11 +23,6 @@ type Package struct {
 	Scripts  Scripts
 	Files    []File
 
-	// ExternalURL, if set, indicates that this package is hosted externally.
-	// The generated index will point to this URL, and the package content
-	// will NOT be included in the repository archive.
-	ExternalURL string
-
 	// ExtraControlFiles contains arbitrary control files to be added to the control archive.
 	// Keys are filenames (e.g., "templates", "conffiles", "triggers"), values are the content.
 	// Reserved names ("control", "md5sums", "conffiles", "preinst", "postinst", "prerm", "postrm", "config") are ignored.
