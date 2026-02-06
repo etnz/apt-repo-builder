@@ -181,7 +181,11 @@ func generateReleaseFile(info ArchiveInfo, packages, packagesGz []byte) []byte {
 	writeField(RelSuite, info.Suite)
 	writeField(RelVersion, info.Version)
 	writeField(RelCodename, info.Codename)
-	writeField(RelDate, time.Now().UTC().Format(time.RFC1123Z))
+	if info.Date != "" {
+		writeField(RelDate, info.Date)
+	} else {
+		writeField(RelDate, time.Now().UTC().Format(time.RFC1123Z))
+	}
 	writeField(RelValidUntil, info.ValidUntil)
 	writeField(RelArchitectures, info.Architectures)
 	writeField(RelComponents, info.Components)
@@ -281,7 +285,11 @@ func generateHierarchicalRelease(info ArchiveInfo, entries []releaseFileEntry) [
 	writeField(RelSuite, info.Suite)
 	writeField(RelVersion, info.Version)
 	writeField(RelCodename, info.Codename)
-	writeField(RelDate, time.Now().UTC().Format(time.RFC1123Z))
+	if info.Date != "" {
+		writeField(RelDate, info.Date)
+	} else {
+		writeField(RelDate, time.Now().UTC().Format(time.RFC1123Z))
+	}
 	writeField(RelValidUntil, info.ValidUntil)
 	writeField(RelArchitectures, info.Architectures)
 	writeField(RelComponents, info.Components)
@@ -416,6 +424,8 @@ func parseReleaseFile(content string, info *ArchiveInfo) error {
 			info.Version = val
 		case RelCodename:
 			info.Codename = val
+		case RelDate:
+			info.Date = val
 		case RelArchitectures:
 			info.Architectures = val
 		case RelComponents:

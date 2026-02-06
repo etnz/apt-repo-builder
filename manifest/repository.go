@@ -93,11 +93,18 @@ func (a *Repository) LoadPackages() ([]Package, error) {
 
 // Compile orchestrates the repository building process.
 // It loads the repository, processes all packages, applies them, and saves the result.
-func (a *Repository) Compile() error {
+func (a *Repository) Compile(gpgKey string, l Listener) error {
+	if l == nil {
+		l = func(fmt.Stringer) {}
+	}
+
 	repo, err := a.LoadRepository()
 	if err != nil {
 		return fmt.Errorf("failed to load repo: %w", err)
 	}
+	l(EventRepositoryLoadSuccess{Path: a.Path})
+
+	repo.GPGKey = gpgKey
 
 	pkgs, err := a.LoadPackages()
 	if err != nil {
@@ -105,19 +112,44 @@ func (a *Repository) Compile() error {
 	}
 
 	for _, pkg := range pkgs {
-		if err := pkg.Apply(repo); err != nil {
+		debPkg, err := pkg.Apply(repo)
+		if err != nil {
 			return fmt.Errorf("failed to apply package: %w", err)
+		}
+		if debPkg != nil {
+			l(EventPackageApplySuccess{
+				FilePath:     pkg.filePath,
+				Package:      debPkg.Metadata.Package,
+				Version:      debPkg.Metadata.Version,
+				Architecture: debPkg.Metadata.Architecture,
+			})
+		} else {
+			// Should not happen if err is nil, but safe fallback
+			l(EventPackageApplySuccess{FilePath: pkg.filePath})
 		}
 	}
 
-	if err := a.SaveRepository(repo); err != nil {
+	ops, err := a.SaveRepository(repo)
+	if err != nil {
 		return fmt.Errorf("failed to save repo: %w", err)
 	}
+
+	for _, op := range ops {
+		l(EventFileOperation{
+			Path:      op.Path,
+			OldDigest: op.OldDigest,
+			NewDigest: op.NewDigest,
+			Created:   op.OldDigest == "",
+			Updated:   op.OldDigest != "" && op.OldDigest != op.NewDigest,
+		})
+	}
+	l(EventRepositorySaveSuccess{Path: a.Path})
+
 	return nil
 }
 
 // SaveRepository writes the current state of the deb.Repository to the configured Path.
-func (a *Repository) SaveRepository(repo *deb.Repository) error {
+func (a *Repository) SaveRepository(repo *deb.Repository) ([]deb.FileOperation, error) {
 	return repo.WriteToDir(a.resolve(a.Path))
 }
 

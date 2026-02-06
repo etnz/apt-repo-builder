@@ -46,6 +46,11 @@ type ArchiveInfo struct {
 	// Reference: https://wiki.debian.org/DebianRepository/Format#Codename
 	Codename string
 
+	// Date specifies the time the repository was generated.
+	//
+	// Reference: https://wiki.debian.org/DebianRepository/Format#Date.2C_Valid-Until
+	Date string
+
 	// Architectures is a space-separated list of architectures supported by this repository.
 	//
 	// Reference: https://wiki.debian.org/DebianRepository/Format#Architectures
@@ -128,6 +133,18 @@ func (r *Repository) Append(pkg *Package) (*Package, error) {
 	}
 	r.Packages = append(r.Packages, pkg)
 	return nil, nil
+}
+
+// FileOperation represents a file system operation performed during repository generation.
+type FileOperation struct {
+	Path      string
+	OldDigest string
+	NewDigest string
+}
+
+// Changed reports whether the file content has changed (or is new).
+func (op FileOperation) Changed() bool {
+	return op.OldDigest != op.NewDigest
 }
 
 // AddOverwrite adds a package to the repository, replacing any existing package
@@ -302,29 +319,86 @@ func (r *Repository) WriteTo(w io.Writer) (int64, error) {
 }
 
 // WriteToDir generates the repository and writes it to the provided directory path.
-func (r *Repository) WriteToDir(path string) error {
+func (r *Repository) WriteToDir(path string) ([]FileOperation, error) {
 	if err := os.MkdirAll(path, 0755); err != nil {
-		return err
+		return nil, err
 	}
 
+	var ops []FileOperation
 	var index []*repoPackage
+
+	// writeFile writes content to a file and records the operation with checksums.
+	writeFile := func(filename string, content []byte) (*FileOperation, error) {
+		fullPath := filepath.Join(path, filename)
+		op := FileOperation{Path: filename}
+
+		h := sha256.Sum256(content)
+		op.NewDigest = hex.EncodeToString(h[:])
+
+		if existing, err := os.ReadFile(fullPath); err == nil {
+			hOld := sha256.Sum256(existing)
+			op.OldDigest = hex.EncodeToString(hOld[:])
+		}
+
+		if op.OldDigest != op.NewDigest {
+			if err := os.WriteFile(fullPath, content, 0644); err != nil {
+				return nil, err
+			}
+		}
+		ops = append(ops, op)
+		return &op, nil
+	}
 
 	// Process Packages
 	for _, pkg := range r.Packages {
-		var buf bytes.Buffer
-		if _, err := pkg.WriteTo(&buf); err != nil {
-			return fmt.Errorf("building package: %w", err)
+		var rp *repoPackage
+		var content []byte
+		filename := pkg.StandardFilename()
+		targetPath := filepath.Join(path, filename)
+
+		// Optimization: Check if we can skip writing
+		currentDigest := pkg.Digest()
+		if f, err := os.Open(targetPath); err == nil {
+			if fileContent, err := io.ReadAll(f); err == nil {
+				h := sha256.Sum256(fileContent)
+				diskDigest := hex.EncodeToString(h[:])
+				if pkg.IsOriginal(currentDigest, diskDigest) {
+					// Content is identical and original, skip regeneration and write
+					ops = append(ops, FileOperation{
+						Path:      filename,
+						OldDigest: diskDigest,
+						NewDigest: diskDigest,
+					})
+					// We still need content for the index parsing (or at least metadata)
+					// Since IsOriginal is true, fileContent is valid.
+					content = fileContent
+				}
+			}
+			f.Close()
 		}
-		content := buf.Bytes()
+
+		if content == nil {
+			var buf bytes.Buffer
+			if _, err := pkg.WriteTo(&buf); err != nil {
+				return nil, fmt.Errorf("building package: %w", err)
+			}
+			content = buf.Bytes()
+		}
 
 		rp, err := parseDeb(content, "")
 		if err != nil {
-			return fmt.Errorf("parsing package: %w", err)
+			return nil, fmt.Errorf("parsing package: %w", err)
 		}
 
-		rp.Filename = fmt.Sprintf("%s_%s_%s.deb", rp.Package, rp.Version, rp.Architecture)
-		if err := os.WriteFile(filepath.Join(path, rp.Filename), content, 0644); err != nil {
-			return err
+		rp.Filename = filename
+		// If content was not nil (skipped), we still need to record the op if we didn't above.
+		// But we handled the skipped case above. If content != nil here and we didn't skip, we write.
+		// We can just use writeFile if we didn't skip.
+		// Let's refactor slightly to use writeFile for the non-skipped case.
+		if len(ops) == 0 || ops[len(ops)-1].Path != filename {
+			if _, err := writeFile(filename, content); err != nil {
+				return nil, err
+			}
 		}
 
 		index = append(index, rp)
@@ -332,8 +406,9 @@ func (r *Repository) WriteToDir(path string) error {
 
 	// Generate Indices
 	packagesContent := generatePackagesFile(index)
-	if err := os.WriteFile(filepath.Join(path, "Packages"), packagesContent, 0644); err != nil {
-		return err
+	opPkg, err := writeFile("Packages", packagesContent)
+	if err != nil {
+		return nil, err
 	}
 
 	var gzBuf bytes.Buffer
@@ -341,35 +416,60 @@ func (r *Repository) WriteToDir(path string) error {
 	gw.Write(packagesContent)
 	gw.Close()
 	packagesGzContent := gzBuf.Bytes()
-	if err := os.WriteFile(filepath.Join(path, "Packages.gz"), packagesGzContent, 0644); err != nil {
-		return err
+	opPkgGz, err := writeFile("Packages.gz", packagesGzContent)
+	if err != nil {
+		return nil, err
+	}
+
+	packagesChanged := opPkg.Changed() || opPkgGz.Changed()
+	if packagesChanged || r.ArchiveInfo.Date == "" {
+		r.ArchiveInfo.Date = time.Now().UTC().Format(time.RFC1123Z)
 	}
 
 	releaseContent := generateReleaseFile(r.ArchiveInfo, packagesContent, packagesGzContent)
-	if err := os.WriteFile(filepath.Join(path, "Release"), releaseContent, 0644); err != nil {
-		return err
+	opRelease, err := writeFile("Release", releaseContent)
+	if err != nil {
+		return nil, err
 	}
 
 	if r.GPGKey != "" {
-		inRelease, err := signBytes(releaseContent, r.GPGKey)
-		if err != nil {
-			return fmt.Errorf("signing InRelease: %w", err)
-		}
-		if err := os.WriteFile(filepath.Join(path, "InRelease"), inRelease, 0644); err != nil {
-			return err
-		}
-
 		pubKey, err := extractPublicKey(r.GPGKey, false)
+		var pubKeyChanged bool
 		if err == nil {
-			os.WriteFile(filepath.Join(path, "public.gpg"), pubKey, 0644)
+			if op, err := writeFile("public.gpg", pubKey); err == nil {
+				pubKeyChanged = op.Changed()
+			}
 		}
 		pubKeyAsc, err := extractPublicKey(r.GPGKey, true)
 		if err == nil {
-			os.WriteFile(filepath.Join(path, "public.asc"), pubKeyAsc, 0644)
+			writeFile("public.asc", pubKeyAsc)
+		}
+
+		var inRelease []byte
+		inReleasePath := filepath.Join(path, "InRelease")
+
+		// If Release and public key didn't change,
+		// Reuse InRelease to avoid re-signing (which changes timestamp)
+		if !opRelease.Changed() && !pubKeyChanged {
+			existing, err := os.ReadFile(inReleasePath)
+			if err == nil {
+				inRelease = existing
+			} else if !os.IsNotExist(err) {
+				return nil, fmt.Errorf("reading existing InRelease: %w", err)
+			}
+		}
+		if inRelease == nil {
+			inRelease, err = signBytes(releaseContent, r.GPGKey)
+			if err != nil {
+				return nil, fmt.Errorf("signing InRelease: %w", err)
+			}
+		}
+		if _, err := writeFile("InRelease", inRelease); err != nil {
+			return nil, err
 		}
 	}
 
-	return nil
+	return ops, nil
 }
 
 // NewRepository creates a Repository from a tar.gz stream.
@@ -406,10 +506,13 @@ func NewRepository(r io.Reader) (*Repository, error) {
 				return nil, fmt.Errorf("parsing Release: %w", err)
 			}
 		case strings.HasSuffix(header.Name, ".deb"):
-			pkg, err := NewPackage(tr)
+			h := sha256.New()
+			trTee := io.TeeReader(tr, h)
+			pkg, err := NewPackage(trTee)
 			if err != nil {
 				return nil, fmt.Errorf("parsing %s: %w", header.Name, err)
 			}
+			pkg.SetOriginalState(pkg.Digest(), hex.EncodeToString(h.Sum(nil)))
 			repo.Packages = append(repo.Packages, pkg)
 		case header.Name == "Packages" || header.Name == "./Packages":
 			buf := new(bytes.Buffer)
@@ -473,11 +576,14 @@ func NewRepositoryFromDir(path string) (*Repository, error) {
 			if err != nil {
 				return nil, err
 			}
-			pkg, err := NewPackage(f)
+			h := sha256.New()
+			r := io.TeeReader(f, h)
+			pkg, err := NewPackage(r)
 			f.Close()
 			if err != nil {
 				return nil, fmt.Errorf("parsing %s: %w", name, err)
 			}
+			pkg.SetOriginalState(pkg.Digest(), hex.EncodeToString(h.Sum(nil)))
 			repo.Packages = append(repo.Packages, pkg)
 		} else if name == "Packages" {
 			content, err := os.ReadFile(fullPath)

@@ -65,10 +65,10 @@ type File struct {
 
 // Apply generates a deb.Package from the definition and adds it to the provided repository.
 // It renders templates, loads resources, and populates the package structure.
-func (p *Package) Apply(repo *deb.Repository) error {
+func (p *Package) Apply(repo *deb.Repository) (*deb.Package, error) {
 	input, err := p.engine.render("input", p.Input)
 	if err != nil {
-		return fmt.Errorf("rendering input: %w", err)
+		return nil, fmt.Errorf("rendering input: %w", err)
 	}
 
 	var pkg *deb.Package
@@ -77,19 +77,19 @@ func (p *Package) Apply(repo *deb.Repository) error {
 	} else {
 		f, err := os.Open(p.resolve(input))
 		if err != nil {
-			return fmt.Errorf("reading input: %w", err)
+			return nil, fmt.Errorf("reading input: %w", err)
 		}
 		defer f.Close()
 		pkg, err = deb.NewPackage(f)
 		if err != nil {
-			return fmt.Errorf("reading input: %w", err)
+			return nil, fmt.Errorf("reading input: %w", err)
 		}
 	}
 
 	for k, v := range p.Meta {
 		val, err := p.engine.render("meta."+k, v)
 		if err != nil {
-			return fmt.Errorf("rendering meta %s: %w", k, err)
+			return nil, fmt.Errorf("rendering meta %s: %w", k, err)
 		}
 		pkg.Set(k, val)
 	}
@@ -97,28 +97,28 @@ func (p *Package) Apply(repo *deb.Repository) error {
 	for i, f := range p.Injects {
 		src, err := p.engine.render(fmt.Sprintf("injects[%d].src", i), f.Src)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		dst, err := p.engine.render(fmt.Sprintf("injects[%d].dst", i), f.Dst)
 		if err != nil {
-			return err
+			return nil, err
 		}
 
 		var mode int64 = 0644
 		if f.Mode != "" {
 			modeStr, err := p.engine.render(fmt.Sprintf("injects[%d].mode", i), f.Mode)
 			if err != nil {
-				return err
+				return nil, err
 			}
 			mode, err = strconv.ParseInt(modeStr, 8, 64)
 			if err != nil {
-				return fmt.Errorf("parsing mode %s: %w", modeStr, err)
+				return nil, fmt.Errorf("parsing mode %s: %w", modeStr, err)
 			}
 		}
 
 		content, err := p.loadResource(src, f.Raw)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		pkg.Files = append(pkg.Files, deb.File{
 			DestPath: dst,
@@ -131,15 +131,15 @@ func (p *Package) Apply(repo *deb.Repository) error {
 	for i, f := range p.Scripts {
 		src, err := p.engine.render(fmt.Sprintf("scripts[%d].src", i), f.Src)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		dst, err := p.engine.render(fmt.Sprintf("scripts[%d].dst", i), f.Dst)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		content, err := p.loadResource(src, f.Raw)
 		if err != nil {
-			return err
+			return nil, err
 		}
 
 		switch dst {
@@ -154,22 +154,22 @@ func (p *Package) Apply(repo *deb.Repository) error {
 		case "config":
 			pkg.Scripts.Config = content
 		default:
-			return fmt.Errorf("unknown script dst: %s", dst)
+			return nil, fmt.Errorf("unknown script dst: %s", dst)
 		}
 	}
 
 	for i, f := range p.ControlFiles {
 		src, err := p.engine.render(fmt.Sprintf("control_files[%d].src", i), f.Src)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		dst, err := p.engine.render(fmt.Sprintf("control_files[%d].dst", i), f.Dst)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		content, err := p.loadResource(src, f.Raw)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if pkg.ExtraControlFiles == nil {
 			pkg.ExtraControlFiles = make(map[string]string)
@@ -177,9 +177,13 @@ func (p *Package) Apply(repo *deb.Repository) error {
 		pkg.ExtraControlFiles[dst] = content
 	}
 
-	if _, err := repo.Append(pkg); err != nil {
-		return err
+	existing, err := repo.Append(pkg)
+	if err != nil {
+		return nil, err
 	}
 
-	return nil
+	if existing != nil {
+		return existing, nil
+	}
+	return pkg, nil
 }

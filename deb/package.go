@@ -28,6 +28,9 @@ type Package struct {
 	// Keys are filenames (e.g., "templates", "conffiles", "triggers"), values are the content.
 	// Reserved names ("control", "md5sums", "conffiles", "preinst", "postinst", "prerm", "postrm", "config") are ignored.
 	ExtraControlFiles map[string]string
+
+	originalContentDigest string
+	onDiskDigest          string
 }
 
 // Metadata maps directly to the fields in the Debian 'control' file.
@@ -705,6 +708,9 @@ func NewPackage(r io.Reader) (*Package, error) {
 // and is insensitive to the order of files in the payload.
 func (p *Package) Digest() string {
 	// Ensure Installed-Size is up to date.
+	// TODO it's a problem if the source has a wrong installed size, this will change the value of the Package that is supposed to be immutable.
+	// We should probably calculate the installed size in NewPackage and store it in the Metadata,
+	// then use that value here instead of recalculating it.
 	var installedSize int64
 	for _, f := range p.Files {
 		installedSize += int64(len(f.Body))
@@ -807,4 +813,19 @@ func (p *Package) Equal(other *Package) bool {
 		return false
 	}
 	return p.Digest() == other.Digest()
+}
+
+// SetOriginalState records the digests of the package when loaded from disk.
+func (p *Package) SetOriginalState(contentDigest, diskDigest string) {
+	p.originalContentDigest = contentDigest
+	p.onDiskDigest = diskDigest
+}
+
+// IsOriginal checks if the package content matches the state when it was loaded
+// and if the provided disk digest matches the original file on disk.
+func (p *Package) IsOriginal(currentContentDigest, diskDigest string) bool {
+	return p.originalContentDigest != "" &&
+		p.onDiskDigest != "" &&
+		p.originalContentDigest == currentContentDigest &&
+		p.onDiskDigest == diskDigest
 }

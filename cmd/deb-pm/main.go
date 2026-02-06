@@ -31,7 +31,25 @@ func runBuild(path string) {
 		log.Fatalf("Failed to load archivefile: %v", err)
 	}
 
-	if err := repository.Compile(); err != nil {
+	gpgKey := os.Getenv("GPG_KEY")
+	if err := repository.Compile(gpgKey, func(e fmt.Stringer) {
+		switch v := e.(type) {
+		case manifest.EventRepositoryLoadSuccess:
+			fmt.Printf("Loaded repository from %s\n", v.Path)
+		case manifest.EventPackageApplySuccess:
+			if v.Package != "" {
+				fmt.Printf("Applied package: %s (%s) [%s]\n", v.Package, v.Version, v.Architecture)
+			}
+		case manifest.EventFileOperation:
+			symbol := "="
+			if v.Created {
+				symbol = "+"
+			} else if v.Updated {
+				symbol = "~"
+			}
+			fmt.Printf(" %s %s\n", symbol, v.Path)
+		}
+	}); err != nil {
 		log.Fatalf("Failed to compile repository: %v", err)
 	}
 
