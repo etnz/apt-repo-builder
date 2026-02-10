@@ -1,89 +1,183 @@
-# deb-pm CLI Documentation
 
-This document provides a detailed reference for the `deb-pm` command-line interface.
 
-## Commands
+## Configuration Reference
 
-### `deb`
+### Repository Configuration
 
-The `deb` command is the core of the tool. It allows you to mint new packages from scratch, patch existing ones, and manage the repository index.
+The repository manifest (usually `repository.yml`) defines the output location, global variables, and the list of packages to include.
 
-**Usage:**
-```bash
-deb-pm deb [flags]
+```yaml
+# yaml-language-server: $schema=https://raw.githubusercontent.com/etnz/apt-repo-builder/master/repository.schema.json
+
+# The directory where the repository structure (dists/, pool/) will be generated or updated.
+# Can be relative to this file or absolute.
+path: "dist"
+
+# Global variables available to all templates in the configuration.
+# These can be referenced as {{ .VAR_NAME }} in this file and in package files.
+defines:
+  # Key, value pair.
+  KEY1: "value"
+
+  # Value can reference other variables.
+  KEY2: "{{ .KEY1 }}_plus"
+
+# List of packages to include in the repository.
+# Entries can be absolute or relative paths to manifest files to generate a .deb file or paths to .deb files that will be included.
+# path can be a file path or a web URL (http, https)
+packages:
+  # 1. Reference to a local package manifest file (YAML/JSON).
+  - "my-component.yml"
+
+  # 2. Reference to a remote package manifest file.
+  - "https://raw.githubusercontent.com/org/repo/main/packages/remote-tool.yml"
+
+  # 3. Direct inclusion of a local .deb file (no manifest needed).
+  # The file is copied as-is into the repository.
+  - "binaries/legacy-tool_1.0.0_amd64.deb"
+
+  # 4. Direct inclusion of a remote .deb file.
+  # The file is downloaded and included.
+  - "https://github.com/org/releases/download/v1.0.0/tool.deb"
+
+  # 5. Using variables in paths.
+  - "{{ .BASE_URL }}/plugin-{{ .VERSION }}.deb"
 ```
 
-**Core Flags:**
+### Package Configuration
 
-*   `--repo string` (Required)
-    *   Path to the repository tarball (e.g., `repo.tar.gz`). If it doesn't exist, a new one is created.
+Package files (e.g., `my-package.yml`) define how to build or patch a single Debian package.
 
-*   `--input string`
-    *   Path or URL to a source `.deb` package to patch. If omitted, starts from an empty package.
+```yaml
+# yaml-language-server: $schema=https://raw.githubusercontent.com/etnz/apt-repo-builder/master/package.schema.json
 
-*   `--strategy string`
-    *   Conflict resolution strategy: `safe`, `bump`, `strict`, `overwrite`.
-    *   Default: `strict`
+# Optional: Start from an existing .deb file to patch it.
+# If omitted, an empty package is created from scratch.
+input: "base-package.deb"
 
-*   `--prune`
-    *   Enable pruning logic to enforce retention policies.
+# Local variables for this package.
+# Can reference global defines from repository.yml.
+defines:
+  # Key, value pair.
+  LOCAL_KEY1: "my-app"
+  # Local variables can reference global variables.
+  LOCAL_KEY2: "{{ .KEY1 }}_plus"
+  # Local variables can reference other local variables. The order doesn't matter as long as there is no cycles.
+  LOCAL_KEY3: "{{ .LOCAL_KEY1 }}_plus"
 
-**Metadata Flags:**
 
-*   `--meta Key=Value`
-    *   Set a field in the `control` file (e.g., `Package=my-tool`, `Version=1.0.0`, `Depends=curl`).
-    *   Can be repeated.
-    *   Reference: Debian Policy: [Control files and their fields](https://www.debian.org/doc/debian-policy/ch-controlfields.html)
+# Metadata fields for the Debian control file.
+meta:
+  Package: "{{ .APP_NAME }}"
+  Version: "{{ .VERSION }}" # Inherited from global defines
+  Architecture: "amd64"
+  Maintainer: "Jane Doe <jane@example.com>"
+  Description: |
+    My Application
+    This is a longer description of the application.
+    It supports multiline strings.
 
-**Content Injection Flags:**
+  # Classification
+  Section: "utils"            # Application category (e.g., utils, web, net)
+  Priority: "optional"        # Importance (optional, extra, required)
 
-*   `--inject src:dst`
-    *   Add a file to the package payload.
-    *   `src`: Local path or URL.
-    *   `dst`: Absolute path on the target system.
+  # Links & Source
+  Homepage: "https://example.com"
+  Source: "my-app-src"        # Source package name (if different)
 
-*   `--inject-tpl src:dst`
-    *   Same as `--inject`, but processes the file as a Go template.
+  # Relationships
+  Depends: "curl, libc6"      # Absolute dependencies required to run
+  Pre-Depends: "tar"          # Required before installation script runs
+  Recommends: "wget"          # Installed by default, but not strictly required
+  Suggests: "doc-pkg"         # Related but not installed by default
+  Enhances: "other-pkg"       # Enhances functionality of another package
+  Conflicts: "old-app"        # Cannot be installed with this package
+  Breaks: "lib-old (< 1.0)"   # Breaks specific versions of other packages
+  Replaces: "old-app"         # Replaces files from another package
+  Provides: "virtual-browser" # Provides a virtual package capability
 
-*   `--conffile src:dst`
-    *   Add a configuration file (automatically added to `conffiles` list).
-    *   Reference: Debian Policy: [Configuration files](https://www.debian.org/doc/debian-policy/ch-files.html#configuration-files)
+  # Advanced
+  Essential: "no"             # If yes, removal requires confirmation (dangerous)
+  Built-Using: "go-1.21"      # For static binaries, tracking source dependencies
 
-*   `--conffile-tpl src:dst`
-    *   Same as `--conffile`, but processes as a template.
+  # Custom fields are allowed and will be added to the control file.
+  X-Custom-Field: "custom-value"
 
-*   `--mode mode:dst`
-    *   Set the file permissions for a specific destination path (e.g., `0755:/usr/bin/my-tool`).
-    *   **Important:** Binaries and executable scripts must be executable (typically `0755`). See Debian Policy: Permissions and owners.
+# Files to add to the package payload (data.tar.gz).
+#
+# By default, files are processed as templates.
+# Use raw: true to disable templating for a specific file.
+injects:
+  # Simple file injection
+  - src: "./bin/app"          # Local source path, relative to this file or absolute, or web URL. It's content will be treated as a template.
+    dst: "/usr/bin/my-app"    # Absolute path on target system
+    mode: "0755"              # Octal permissions (string)
 
-**Script Flags:**
+  # Configuration file with templating
+  - src: "./configs/app.conf"
+    dst: "/etc/my-app/app.conf"
+    conffile: true            # Mark as configuration file (dpkg will prompt on overwrite)
 
-*   `--script src:dst`
-    *   Inject a maintainer script.
-    *   `dst` must be one of: `preinst`, `postinst`, `prerm`, `postrm`, `config`.
-    *   Reference: Debian Policy: [Maintainer Scripts](https://www.debian.org/doc/debian-policy/ch-binary.html#maintainer-scripts)
+  # Download and inject a file from a URL
+  - src: "https://example.com/assets/logo.png"
+    dst: "/usr/share/my-app/logo.png"
+    mode: "0644"
+    raw: true                 # Binary files should usually be raw to avoid template errors
 
-*   `--script-tpl src:dst`
-    *   Same as `--script`, but processes as a template.
+# Maintainer scripts (control.tar.gz).
+scripts:
+  - src: "./scripts/postinst.sh"
+    dst: "postinst"           # Must be one of: preinst, postinst, prerm, postrm, config
 
-**Control File Flags:**
+# Auxiliary control files (control.tar.gz).
+control_files:
+  - src: "./triggers"
+    dst: "triggers"           # Filename in the control archive
 
-**Warning:** In Debian terminology, "Control Files" refers to any file in the control archive (e.g., `postinst`, `md5sums`, `triggers`), not just the main metadata file named `control`. This naming collision is unfortunate but standard. See Debian Policy: Binary package control files.
+## Repository Integrity & Development Workflow
 
-*   `--control src:dst`
-    *   Inject an auxiliary control file (e.g., `triggers`, `templates`).
-    *   Note: `control`, `conffiles`, `md5sums`, and maintainer scripts (`postinst`, etc.) are handled automatically or via specific flags and cannot be overwritten here.
+### Immutability and Errors
 
-*   `--control-tpl src:dst`
-    *   Same as `--control`, but processes as a template.
+`deb-pm` is designed to protect the integrity of your repository. It enforces a strict rule: **You cannot overwrite an existing package version with different content.**
 
-**Context Flags:**
+If you run `deb-pm` multiple times on the same configuration without changing anything, it will succeed (idempotent). However, if you modify a package definition (e.g., change a script or a file) but keep the same `Version` in the metadata, `deb-pm` will fail with an error stating that the package already exists.
 
-*   `--define KEY=VALUE`
-    *   Define a variable available to templates.
+**Why?**
+APT repositories rely on checksums (SHA256) listed in the `Packages` index to verify downloaded `.deb` files. If you change a `.deb` file in place without updating the version:
+1.  Clients with an old `Packages` index will fail to verify the new file (checksum mismatch).
+2.  Caching proxies and mirrors may serve the old file or a corrupted mix.
+3.  It breaks the principle of immutable releases.
 
-### `purge`
+### Recommended Workflows
 
-Cleanup the repository based on retention policies.
+#### 1. The Release Flow
+When you make changes to a package, the standard practice is to **bump the version number** in your YAML configuration (e.g., change `1.0.0` to `1.0.1`). This creates a new package file, which `deb-pm` happily adds to the repository index.
 
-*Not yet implemented.*
+#### 2. The Local Dev Loop
+When developing (e.g., debugging a `postinst` script), you might not want to bump the version for every trial. To iterate on the *same* version locally, you must reset the repository to its state *before* that version was added (or to a state where that version matches your new build).
+
+Since `deb-pm` operates directly on the output directory, it doesn't know what the "original" state was. You need to handle this reset.
+
+**Using Git (Recommended)**
+If your `dist` folder is tracked in git (as an artifact repository), you can use git to reset the state before building.
+
+```bash
+# 1. Reset the dist folder to the remote/clean state
+git checkout HEAD -- dist/
+git clean -fd dist/
+
+# 2. Run the build with your changes
+deb-pm repo.yml
+```
+
+**Using File Copies**
+If you are not using git, you can maintain a "clean" copy of the previous repository state.
+
+```bash
+# 1. Restore dist from a backup/previous state
+rsync -a --delete dist-prev/ dist/
+
+# 2. Run the build
+deb-pm repo.yml
+```
+```

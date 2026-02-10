@@ -7,14 +7,14 @@
   "properties": {
     "input": {
       "type": "string",
-      "description": "Path to an optional source .deb package to patch"
+      "description": "Path to an optional source .deb package to patch. Path can be relative (to the Packagefile) or absolute, or web URL."
     },
     "defines": {
       "type": "object",
       "additionalProperties": {
         "type": "string"
       },
-      "description": "Local variables available to templates"
+      "description": "Local variables available to templates."
     },
     "meta": {
       "type": "object",
@@ -53,11 +53,11 @@
       "properties": {
         "src": {
           "type": "string",
-          "description": "Path to the source file (relative to the package file)"
+          "description": "Path to the source file (relative to the package file) or absolute or a web URL"
         },
         "dst": {
           "type": "string",
-          "description": "Absolute path on target system, or script name"
+          "description": "Absolute path on the target system, or script name"
         },
         "raw": {
           "type": "boolean",

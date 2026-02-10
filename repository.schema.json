@@ -10,21 +10,21 @@
   "properties": {
     "path": {
       "type": "string",
-      "description": "Directory path where the repository will be generated"
+      "description": "Directory path where the repository will be generated or updated"
     },
     "defines": {
       "type": "object",
       "additionalProperties": {
         "type": "string"
       },
-      "description": "Global variables available to templates"
+      "description": "Global variables available to templates in all packages manifest files."
     },
     "packages": {
       "type": "array",
       "items": {
         "type": "string"
       },
-      "description": "List of paths to package definition files"
+      "description": "List of paths to package manifest files or .deb package file to be integrated into the repository. path can be relative or absolute, or web URL."
     }
   }
 }

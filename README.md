@@ -4,7 +4,7 @@ UNDER TEST
 
 **deb-pm** is a transactional, serverless Debian repository manager. It allows you to mint, patch, and manage Debian packages and repositories purely from the command line, without requiring `dpkg`, `apt-ftparchive`, or root privileges.
 
-It is designed for modern CI/CD pipelines where repositories are artifacts (tarballs) rather than static directory trees.
+It is designed for modern CI/CD pipelines where repositories are artifacts.
 
 ## Installation
 
@@ -18,74 +18,63 @@ This tool is built on top of the `deb` package, a pure Go library for manipulati
 
 *   [GoDoc Documentation](https://pkg.go.dev/github.com/etnz/apt-repo-builder/deb)
 
-## CLI Documentation
+## Usage
 
-For a complete reference of all commands and flags, please see [Documentation.md](Documentation.md).
+```shell
+$ deb-pm [repositoryfile]
+```
+
+If no file is specified, `deb-pm` looks for `repository.yml`, `repository.yaml`, or `repository.json` in the current directory.
+
 
 ## Usage Examples
 
-### Simple Configuration Package
+### Declarative Repository
 
-Create a simple meta-package from scratch that installs a configuration file.
+Define your repository and packages in YAML configuration files and build them in one go.
 
-```bash
-deb-pm deb \
-  --repo repo.tar.gz \
-  --meta Package="my-app" \
-  --meta Version="1.0.0" \
-  --meta Architecture="all" \
-  --meta Maintainer="Dev <deb@example.com>" \
-  --meta Description="My awesome CLI tool" \
-  --inject "./bin/my-app:/usr/bin/my-app" \
-  --mode "0755:/usr/bin/my-app" \
-  --conffile "./local.conf:/etc/my-app/local.conf"
+**`repo.yml`**
+```yaml
+# yaml-language-server: $schema=https://raw.githubusercontent.com/etnz/apt-repo-builder/master/repository.schema.json
+
+# the local folder that contains the current version of the repository (empty supported)
+path: "dist"
+
+# defines global variables that are available everywhere in the configuration.
+defines:
+  VERSION: "1.0.0"
+
+# packages is a list of package manifest files in yaml|json file or directly .deb files to be included.
+packages:
+  - my-package.yml
 ```
 
-### Binary Package with Variables
+**`my-package.yml`**
+```yaml
+# yaml-language-server: $schema=https://raw.githubusercontent.com/etnz/apt-repo-builder/master/package.schema.json
 
-`deb-pm` is designed to be used with shell scripts. By using command-line flags, you can leverage the full power of Bash variables to define your package metadata and content dynamically.
+# manifest file to generate a .deb package file.
 
-```bash
-NAME="my-app"
-VERSION="1.0.0"
+# meta adds debian metadata info.
+meta:
+  Package: "my-app"
+  Version: "{{ .VERSION }}" # values are treated as Go templates.
+  Architecture: "amd64"
+  Maintainer: "Dev <dev@example.com>"
+  Description: "My awesome CLI tool"
 
-deb-pm deb \
-  --repo repo.tar.gz \
-  --meta Package="${NAME}" \
-  --meta Version="${VERSION}" \
-  --meta Architecture="amd64" \
-  --meta Maintainer="Dev <dev@example.com>" \
-  --meta Description="My awesome CLI tool" \
-  --inject "./bin/${NAME}:/usr/bin/${NAME}" \
-  --mode "0755:/usr/bin/${NAME}" \
-  --conffile "./local.conf:/etc/${NAME}/local.conf"
+# injects add files in the data archive.
+injects:
+  - src: "./bin/my-app"
+    dst: "/usr/bin/my-app"
+    mode: "0755"
+  - src: "./local.conf" # note that the local.conf will be treated as a template too.
+    dst: "/etc/my-app/local.conf" 
+    conffile: true
 ```
 
-### Binary Package with Variables And Templates
-
-You can inject variables into your configuration files or scripts at build time using the Go template syntax.
-
-**`local.conf`**
-```conf
-copyright= (c) {{.NAME}} {{.VERSION}}
-```
-
-**Build Command**
+**Build**
 
 ```bash
-NAME="my-app"
-VERSION="1.0.0"
-
-deb-pm deb \
-  --repo repo.tar.gz \
-  --define NAME="${NAME}" \
-  --define VERSION="${VERSION}" \
-  --meta Package="${NAME}" \
-  --meta Version="${VERSION}" \
-  --meta Architecture="amd64" \
-  --meta Maintainer="Dev <dev@example.com>" \
-  --meta Description="My awesome CLI tool" \
-  --inject "./bin/${NAME}:/usr/bin/${NAME}" \
-  --mode "0755:/usr/bin/${NAME}" \
-  --conffile-tpl "./local.conf:/etc/${NAME}/local.conf"
+deb-pm repo.yml
 ```
