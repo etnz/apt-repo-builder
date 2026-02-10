@@ -362,6 +362,9 @@ func parseControlFile(content string, m *Metadata) error {
 				m.BuiltUsing = val
 			case FieldSource:
 				m.Source = val
+			case FieldInstalledSize:
+				//ignore installed size when reading
+
 			default:
 				m.ExtraFields[currentKey] = val
 			}

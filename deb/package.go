@@ -285,6 +285,8 @@ func (p *Package) Set(key, value string) {
 		p.Metadata.BuiltUsing = value
 	case FieldSource:
 		p.Metadata.Source = value
+	case FieldInstalledSize:
+		// ignored, computed at generation time.
 	default:
 		if p.Metadata.ExtraFields == nil {
 			p.Metadata.ExtraFields = make(map[string]string)

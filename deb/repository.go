@@ -121,13 +121,6 @@ func (r *Repository) Append(pkg *Package) (*Package, error) {
 		if existing.Equal(pkg) {
 			return existing, nil
 		}
-		// f1, _ := os.CreateTemp("", "existing-*.txt")
-		// f1.WriteString(existing.String())
-		// f1.Close()
-		// f2, _ := os.CreateTemp("", "new-*.txt")
-		// f2.WriteString(pkg.String())
-		// f2.Close()
-		// fmt.Printf("existing: %s\nnew: %s\n", f1.Name(), f2.Name())
 
 		return existing, fmt.Errorf("package %s version %s for %s already exists", pkg.Metadata.Package, pkg.Metadata.Version, pkg.Metadata.Architecture)
 	}
@@ -485,8 +478,6 @@ func NewRepository(r io.Reader) (*Repository, error) {
 		Packages: []*Package{},
 	}
 
-	var externalPkgs []*Package
-
 	for {
 		header, err := tr.Next()
 		if err == io.EOF {
@@ -514,30 +505,6 @@ func NewRepository(r io.Reader) (*Repository, error) {
 			}
 			pkg.SetOriginalState(pkg.Digest(), hex.EncodeToString(h.Sum(nil)))
 			repo.Packages = append(repo.Packages, pkg)
-		case header.Name == "Packages" || header.Name == "./Packages":
-			buf := new(bytes.Buffer)
-			if _, err := io.Copy(buf, tr); err != nil {
-				return nil, err
-			}
-			pkgs, err := parsePackagesIndex(buf.String())
-			if err != nil {
-				return nil, fmt.Errorf("parsing Packages: %w", err)
-			}
-			externalPkgs = pkgs
-		}
-	}
-
-	// Merge external packages
-	existing := make(map[string]bool)
-	for _, p := range repo.Packages {
-		key := fmt.Sprintf("%s_%s_%s", p.Metadata.Package, p.Metadata.Version, p.Metadata.Architecture)
-		existing[key] = true
-	}
-
-	for _, p := range externalPkgs {
-		key := fmt.Sprintf("%s_%s_%s", p.Metadata.Package, p.Metadata.Version, p.Metadata.Architecture)
-		if !existing[key] {
-			repo.Packages = append(repo.Packages, p)
 		}
 	}
 
@@ -549,7 +516,6 @@ func NewRepositoryFromDir(path string) (*Repository, error) {
 	repo := &Repository{
 		Packages: []*Package{},
 	}
-	var externalPkgs []*Package
 
 	entries, err := os.ReadDir(path)
 	if err != nil {
@@ -585,30 +551,6 @@ func NewRepositoryFromDir(path string) (*Repository, error) {
 			}
 			pkg.SetOriginalState(pkg.Digest(), hex.EncodeToString(h.Sum(nil)))
 			repo.Packages = append(repo.Packages, pkg)
-		} else if name == "Packages" {
-			content, err := os.ReadFile(fullPath)
-			if err != nil {
-				return nil, err
-			}
-			pkgs, err := parsePackagesIndex(string(content))
-			if err != nil {
-				return nil, fmt.Errorf("parsing Packages: %w", err)
-			}
-			externalPkgs = pkgs
-		}
-	}
-
-	// Merge external packages
-	existing := make(map[string]bool)
-	for _, p := range repo.Packages {
-		key := fmt.Sprintf("%s_%s_%s", p.Metadata.Package, p.Metadata.Version, p.Metadata.Architecture)
-		existing[key] = true
-	}
-
-	for _, p := range externalPkgs {
-		key := fmt.Sprintf("%s_%s_%s", p.Metadata.Package, p.Metadata.Version, p.Metadata.Architecture)
-		if !existing[key] {
-			repo.Packages = append(repo.Packages, p)
 		}
 	}
 

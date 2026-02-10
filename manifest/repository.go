@@ -2,6 +2,7 @@
 package manifest
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -26,7 +27,10 @@ func NewRepository(path string) (*Repository, error) {
 	}
 
 	archive.filePath = path
-	archive.engine = newTemplateEngine(archive.Defines)
+	archive.engine, err = newTemplateEngine(archive.Defines)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize template engine: %w", err)
+	}
 
 	if archive.Path == "" {
 		return nil, fmt.Errorf("archivefile must specify 'repo'")
@@ -71,20 +75,50 @@ func (a *Repository) LoadRepository() (*deb.Repository, error) {
 func (a *Repository) LoadPackages() ([]Package, error) {
 	var pkgs []Package
 
-	for _, pkgFile := range a.Packages {
+	for _, pkgFileRaw := range a.Packages {
+		// pkgFile can be
+		//  - a relative path to the repository file
+		//  - an absolute file path on the machine
+		//  - a URL
+		//
+		// We want to find the resource, or course, but also get a valid string for error message
+		pkgFile, err := a.engine.render("package-list", pkgFileRaw)
+		if err != nil {
+			return nil, fmt.Errorf("rendering package path %q: %w", pkgFileRaw, err)
+		}
 		pkgPath := a.resolve(pkgFile)
+
+		if strings.HasSuffix(strings.ToLower(pkgPath), ".deb") {
+			eng, err := a.engine.sub(nil)
+			if err != nil {
+				return nil, fmt.Errorf("failed to create engine for %s: %w", pkgPath, err)
+			}
+			pkg := Package{
+				Input:    pkgPath,
+				filePath: pkgPath,
+				engine:   eng,
+			}
+			pkgs = append(pkgs, pkg)
+			continue
+		}
+
 		pkgContent, err := a.loadResource(pkgFile)
 		if err != nil {
 			return nil, fmt.Errorf("failed to read package definition %s: %v", pkgPath, err)
 		}
 
 		var pkg Package
-		if err := unmarshal(pkgPath, []byte(pkgContent), &pkg); err != nil {
+		if err := unmarshal(pkgFile, []byte(pkgContent), &pkg); err != nil {
 			return nil, fmt.Errorf("failed to parse package definition %s: %v", pkgPath, err)
 		}
 
+		pkg.engine, err = a.engine.sub(pkg.Defines)
+		if err != nil {
+			return nil, fmt.Errorf("failed to process defines for %s: %w", pkgPath, err)
+		}
+
+		// if the file path is a URL, use
 		pkg.filePath = pkgPath
-		pkg.engine = a.engine.sub(pkg.Defines)
 		pkgs = append(pkgs, pkg)
 	}
 
@@ -114,7 +148,7 @@ func (a *Repository) Compile(gpgKey string, l Listener) error {
 	for _, pkg := range pkgs {
 		debPkg, err := pkg.Apply(repo)
 		if err != nil {
-			return fmt.Errorf("failed to apply package: %w", err)
+			return fmt.Errorf("failed to apply package %q: %w", pkg.filePath, err)
 		}
 		if debPkg != nil {
 			l(EventPackageApplySuccess{
@@ -154,7 +188,7 @@ func (a *Repository) SaveRepository(repo *deb.Repository) ([]deb.FileOperation, 
 }
 
 func (a *Repository) resolve(path string) string {
-	if filepath.IsAbs(path) {
+	if filepath.IsAbs(path) || strings.HasPrefix(path, "http://") || strings.HasPrefix(path, "https://") {
 		return path
 	}
 	return filepath.Join(filepath.Dir(a.filePath), path)
@@ -172,8 +206,13 @@ func (a *Repository) loadResource(path string) (string, error) {
 // unmarshal parses JSON or YAML based on file extension.
 func unmarshal(path string, data []byte, v interface{}) error {
 	ext := strings.ToLower(filepath.Ext(path))
+	r := bytes.NewReader(data)
 	if ext == ".yaml" || ext == ".yml" {
-		return yaml.Unmarshal(data, v)
+		dec := yaml.NewDecoder(r)
+		dec.KnownFields(true)
+		return dec.Decode(v)
 	}
-	return json.Unmarshal(data, v)
+	dec := json.NewDecoder(r)
+	dec.DisallowUnknownFields()
+	return dec.Decode(v)
 }

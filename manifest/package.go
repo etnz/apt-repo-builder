@@ -2,9 +2,12 @@ package manifest
 
 import (
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 
 	"github.com/etnz/apt-repo-builder/deb"
 )
@@ -38,11 +41,33 @@ func (p *Package) resolve(path string) string {
 }
 
 func (p *Package) loadResource(path string, raw bool) (string, error) {
-	resolved := p.resolve(path)
-	content, err := os.ReadFile(resolved)
-	if err != nil {
-		return "", err
+	var content []byte
+	var err error
+
+	if strings.HasPrefix(path, "http://") || strings.HasPrefix(path, "https://") {
+		//TODO: design a permanent cache for http resources (but it depends on the source capability to handle etag)
+		resp, err := http.Get(path)
+		if err != nil {
+			return "", fmt.Errorf("failed to fetch resource %s: %w", path, err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			return "", fmt.Errorf("failed to fetch resource %s: %s", path, resp.Status)
+		}
+
+		content, err = io.ReadAll(resp.Body)
+		if err != nil {
+			return "", fmt.Errorf("failed to read resource body %s: %w", path, err)
+		}
+	} else {
+		resolved := p.resolve(path)
+		content, err = os.ReadFile(resolved)
+		if err != nil {
+			return "", fmt.Errorf("reading resource %s: %w", resolved, err)
+		}
 	}
+
 	if raw {
 		return string(content), nil
 	}
@@ -75,14 +100,15 @@ func (p *Package) Apply(repo *deb.Repository) (*deb.Package, error) {
 	if input == "" {
 		pkg = &deb.Package{Metadata: deb.Metadata{ExtraFields: make(map[string]string)}}
 	} else {
-		f, err := os.Open(p.resolve(input))
+		// The input .deb is a binary resource, so it should not be templated.
+		// We pass `true` for the `raw` parameter to load it as-is.
+		content, err := p.loadResource(input, true)
 		if err != nil {
-			return nil, fmt.Errorf("reading input: %w", err)
+			return nil, fmt.Errorf("reading input package %s: %w", input, err)
 		}
-		defer f.Close()
-		pkg, err = deb.NewPackage(f)
+		pkg, err = deb.NewPackage(strings.NewReader(content))
 		if err != nil {
-			return nil, fmt.Errorf("reading input: %w", err)
+			return nil, fmt.Errorf("parsing input package %s: %w", input, err)
 		}
 	}
 
@@ -178,12 +204,12 @@ func (p *Package) Apply(repo *deb.Repository) (*deb.Package, error) {
 	}
 
 	existing, err := repo.Append(pkg)
-	if err != nil {
-		return nil, err
-	}
-
-	if existing != nil {
+	switch {
+	case existing != nil && err == nil:
 		return existing, nil
+	case err != nil:
+		return nil, fmt.Errorf("appending package %s: %w", pkg.Metadata.Package, err)
+	default:
+		return pkg, nil
 	}
-	return pkg, nil
 }
