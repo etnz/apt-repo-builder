@@ -12,14 +12,99 @@
     "defines": {
       "type": "object",
       "additionalProperties": {
-        "type": "string"
+        "type": "string",
+        "description": "Value of the variable. Can reference other variables using Go template syntax {{ .VAR }}."
       },
       "description": "Local variables available to templates."
     },
     "meta": {
       "type": "object",
+      "properties": {
+        "Package": {
+          "type": "string",
+          "description": "The name of the package. It must consist only of lower case letters (a-z), digits (0-9), plus (+) and minus (-) signs, and periods (.)."
+        },
+        "Version": {
+          "type": "string",
+          "description": "The version number of the package. Format: [epoch:]upstream_version[-debian_revision]."
+        },
+        "Architecture": {
+          "type": "string",
+          "description": "The hardware architecture the package is compiled for (e.g., 'amd64', 'arm64', 'all')."
+        },
+        "Maintainer": {
+          "type": "string",
+          "description": "Name and email address of the person responsible for this package. Format: 'Name <email@address.com>'."
+        },
+        "Description": {
+          "type": "string",
+          "description": "The package synopsis and extended description."
+        },
+        "Section": {
+          "type": "string",
+          "description": "Application category (e.g., 'utils', 'web', 'devel')."
+        },
+        "Priority": {
+          "type": "string",
+          "description": "Importance of this package (e.g., 'optional', 'required', 'extra')."
+        },
+        "Homepage": {
+          "type": "string",
+          "description": "URL of the upstream project's home page."
+        },
+        "Essential": {
+          "type": "string",
+          "enum": ["yes", "no"],
+          "description": "If 'yes', removal requires confirmation. Use with extreme caution."
+        },
+        "Depends": {
+          "type": "string",
+          "description": "Packages that must be installed for this package to provide a significant amount of functionality."
+        },
+        "Pre-Depends": {
+          "type": "string",
+          "description": "Packages that must be installed and configured before the installation of this package can be attempted."
+        },
+        "Recommends": {
+          "type": "string",
+          "description": "Packages that would be found together with this one in all but unusual installations."
+        },
+        "Suggests": {
+          "type": "string",
+          "description": "Packages that are related to this one and can enhance its usefulness, but are not necessary."
+        },
+        "Enhances": {
+          "type": "string",
+          "description": "Indicates that this package enhances the functionality of the listed packages."
+        },
+        "Conflicts": {
+          "type": "string",
+          "description": "Packages that cannot be unpacked or installed while this package is installed."
+        },
+        "Breaks": {
+          "type": "string",
+          "description": "Packages that this package breaks."
+        },
+        "Replaces": {
+          "type": "string",
+          "description": "Packages whose files are overwritten by this package."
+        },
+        "Provides": {
+          "type": "string",
+          "description": "Virtual packages that this package provides."
+        },
+        "Built-Using": {
+          "type": "string",
+          "description": "Source packages used to build this binary package."
+        },
+        "Source": {
+          "type": "string",
+          "description": "Source package name if it differs from the binary package name."
+        }
+      },
       "additionalProperties": {
-        "type": "string"
+        "type": "string",
+        "description": "Custom fields (e.g. X-Custom-Field)"
       },
       "description": "Fields to set or override in the package control file (e.g. Package, Version, Depends)"
     },

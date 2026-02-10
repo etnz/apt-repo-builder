@@ -15,7 +15,8 @@
     "defines": {
       "type": "object",
       "additionalProperties": {
-        "type": "string"
+        "type": "string",
+        "description": "Value of the variable. Can reference other variables using Go template syntax {{ .VAR }}."
       },
       "description": "Global variables available to templates in all packages manifest files."
     },
